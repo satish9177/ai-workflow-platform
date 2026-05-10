@@ -1,0 +1,23 @@
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.pytest_cache/
+.coverage
+htmlcov/
+alembic/versions/*.pyc
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+.DS_Store
+
+# Docker
+.docker/
+
+# Environment Files
+.env
+.env.local
