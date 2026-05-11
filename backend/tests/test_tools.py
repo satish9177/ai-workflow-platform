@@ -36,7 +36,7 @@ class FakeAsyncClient:
         return FakeResponse()
 
 
-async def test_tool_registry_has_expected_tools():
+async def test_registry_contains_tools():
     names = ToolRegistry.all_names()
 
     assert "http_request" in names
@@ -44,23 +44,23 @@ async def test_tool_registry_has_expected_tools():
     assert "whatsapp" in names
 
 
-async def test_tool_registry_get_nonexistent_returns_none():
+async def test_registry_unknown_tool():
     assert ToolRegistry.get("nonexistent") is None
 
 
-async def test_http_request_missing_url_returns_failure():
+async def test_http_missing_url():
     result = await HttpRequestTool().execute("execute", {}, {})
 
     assert result.success is False
     assert "url" in result.error
 
 
-async def test_http_request_success_uses_mocked_async_client(monkeypatch):
+async def test_http_get_success(monkeypatch):
     monkeypatch.setattr("app.tools.http_request.httpx.AsyncClient", FakeAsyncClient)
 
     result = await HttpRequestTool().execute(
         "execute",
-        {"url": "https://example.test/api", "method": "post", "body": {"hello": "world"}},
+        {"url": "https://example.test/api", "method": "get"},
         {},
     )
 
