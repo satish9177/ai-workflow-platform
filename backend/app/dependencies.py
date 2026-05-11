@@ -10,11 +10,11 @@ from app.database import get_db
 from app.models.user import User
 
 
-security = HTTPBearer(auto_error=False)
+security = HTTPBearer()
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     credentials_exception = HTTPException(
@@ -24,8 +24,6 @@ async def get_current_user(
     )
 
     try:
-        if credentials is None:
-            raise credentials_exception
         payload = decode_access_token(credentials.credentials)
         user_id = payload.get("sub")
         if not user_id:
