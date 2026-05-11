@@ -1,18 +1,19 @@
 from typing import Any
 from dataclasses import asdict
 
-from jinja2 import Template, TemplateError
+from jinja2 import TemplateError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.llm.registry import LLMRegistry
 from app.llm.types import LLMMessage, LLMRequest
 from app.memory import get_history, save_turn
+from app.utils.template_renderer import render_template_object
 
 
 def render_template(template_str: str, context: dict[str, Any]) -> str:
     try:
-        return Template(template_str).render(**context)
+        return render_template_object(template_str, context)
     except TemplateError as exc:
         raise ValueError("Failed to render LLM template") from exc
 
