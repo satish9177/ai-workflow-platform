@@ -16,6 +16,8 @@ dependencies = [
     "redis",
     "httpx",
     "openai",
+    "anthropic",
+    "google-generativeai",
     "simpleeval",
     "apscheduler",
     "jinja2",

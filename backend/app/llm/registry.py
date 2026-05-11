@@ -45,3 +45,16 @@ class LLMRegistry:
             model=response.model,
         )
         return response
+
+
+def register_configured_providers(settings, reset: bool = False) -> None:
+    from app.llm.providers.anthropic import AnthropicProvider
+    from app.llm.providers.gemini import GeminiProvider
+    from app.llm.providers.openai import OpenAIProvider
+
+    if reset:
+        LLMRegistry.clear()
+
+    LLMRegistry.register(OpenAIProvider(settings.openai_api_key))
+    LLMRegistry.register(AnthropicProvider(settings.anthropic_api_key))
+    LLMRegistry.register(GeminiProvider(settings.gemini_api_key))

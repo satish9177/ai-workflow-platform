@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     smtp_password: str
     smtp_from_email: str
     app_base_url: str
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
+    default_llm_provider: str = "openai"
+    default_llm_model: str = "gpt-4o-mini"
+    llm_timeout_seconds: int = 60
     cors_origins: list[str] = ["http://localhost:5173"]
     log_level: str = "INFO"
 

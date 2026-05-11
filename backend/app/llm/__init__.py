@@ -7,7 +7,7 @@ from app.llm.errors import (
     ProviderUnavailableError,
     RateLimitError,
 )
-from app.llm.registry import LLMRegistry
+from app.llm.registry import LLMRegistry, register_configured_providers
 from app.llm.types import LLMMessage, LLMRequest, LLMResponse, LLMUsage
 
 __all__ = [
@@ -23,4 +23,5 @@ __all__ = [
     "ModelNotFoundError",
     "ProviderUnavailableError",
     "RateLimitError",
+    "register_configured_providers",
 ]
