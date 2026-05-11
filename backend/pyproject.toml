@@ -1,0 +1,47 @@
+[project]
+name = "ai-workflow-platform-backend"
+version = "0.1.0"
+description = "FastAPI backend for an AI workflow automation platform"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn[standard]",
+    "sqlalchemy==2.0.36",
+    "asyncpg",
+    "alembic",
+    "pydantic-settings",
+    "python-jose[cryptography]",
+    "passlib[bcrypt]",
+    "arq==0.26.1",
+    "redis",
+    "httpx",
+    "openai",
+    "simpleeval",
+    "apscheduler",
+    "jinja2",
+    "cryptography",
+    "structlog",
+    "croniter",
+    "email-validator",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "pytest-cov",
+]
+
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["alembic*"]

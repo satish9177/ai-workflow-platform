@@ -1,0 +1,28 @@
+Metadata-Version: 2.4
+Name: ai-workflow-platform-backend
+Version: 0.1.0
+Summary: FastAPI backend for an AI workflow automation platform
+Requires-Python: >=3.11
+Requires-Dist: fastapi==0.115.0
+Requires-Dist: uvicorn[standard]
+Requires-Dist: sqlalchemy==2.0.36
+Requires-Dist: asyncpg
+Requires-Dist: alembic
+Requires-Dist: pydantic-settings
+Requires-Dist: python-jose[cryptography]
+Requires-Dist: passlib[bcrypt]
+Requires-Dist: arq==0.26.1
+Requires-Dist: redis
+Requires-Dist: httpx
+Requires-Dist: openai
+Requires-Dist: simpleeval
+Requires-Dist: apscheduler
+Requires-Dist: jinja2
+Requires-Dist: cryptography
+Requires-Dist: structlog
+Requires-Dist: croniter
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"
+Requires-Dist: httpx; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
