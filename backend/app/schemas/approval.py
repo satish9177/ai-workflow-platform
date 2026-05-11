@@ -10,6 +10,7 @@ class ApprovalRead(BaseModel):
     id: str
     run_id: str
     step_id: str
+    token: str
     status: str
     context: dict[str, Any] | None
     approver_email: str

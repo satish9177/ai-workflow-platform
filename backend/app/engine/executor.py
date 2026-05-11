@@ -111,7 +111,7 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
 
             run.current_step = step_id
             await _upsert_step(db, run_id, step_id, step_type, "running", input=step)
-            await db.commit()
+            await db.commit()  
 
             try:
                 output = await _dispatch_step(step, context, run_id, db)
