@@ -3,6 +3,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
 
 from app.engine.steps.approval import ApprovalRequiredException, run_approval_step
 from app.engine.steps.condition import run_condition_step
@@ -12,6 +13,9 @@ from app.models.run import Run
 from app.models.step_result import StepResult
 from app.models.workflow import Workflow
 from app.tools.registry import ToolRegistry
+
+
+logger = structlog.get_logger(__name__)
 
 
 async def _get_existing_step(db: AsyncSession, run_id: str, step_id: str) -> StepResult | None:
@@ -93,6 +97,7 @@ async def _dispatch_step(
 async def execute_run(run_id: str, db: AsyncSession) -> None:
     run = await db.get(Run, run_id)
     if run is None:
+        logger.warning("run.not_found", run_id=run_id)
         return
 
     workflow = await db.get(Workflow, run.workflow_id)
@@ -100,8 +105,10 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
         run.status = "failed"
         run.error = "Workflow not found"
         await db.commit()
+        logger.error("run.failed", run_id=run_id, workflow_id=run.workflow_id, error="Workflow not found")
         return
 
+    logger.info("run.started", run_id=run.id, workflow_id=workflow.id)
     context: dict[str, Any] = dict(run.context or {})
     if run.trigger_data:
         context.setdefault("trigger_data", run.trigger_data)
@@ -120,6 +127,13 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
                     context[step_id] = existing.output
                 continue
 
+            logger.info(
+                "step.started",
+                run_id=run_id,
+                workflow_id=workflow.id,
+                step_id=step_id,
+                step_type=step_type,
+            )
             run.current_step = step_id
             await _upsert_step(db, run_id, step_id, step_type, "running", input=step)
             await db.commit()  
@@ -131,7 +145,26 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
                 run.status = "paused"
                 run.context = context
                 await db.commit()
+                logger.info(
+                    "run.paused",
+                    run_id=run_id,
+                    workflow_id=workflow.id,
+                    step_id=step_id,
+                    step_type=step_type,
+                )
                 return
+            except Exception as exc:
+                await _upsert_step(db, run_id, step_id, step_type, "failed", input=step, error=str(exc))
+                await db.commit()
+                logger.exception(
+                    "step.failed",
+                    run_id=run_id,
+                    workflow_id=workflow.id,
+                    step_id=step_id,
+                    step_type=step_type,
+                    error=str(exc),
+                )
+                raise
 
             normalized_output = output if isinstance(output, dict) else {"result": output}
             context[step_id] = normalized_output
@@ -145,17 +178,26 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
                 output=normalized_output,
             )
             await db.commit()
+            logger.info(
+                "step.completed",
+                run_id=run_id,
+                workflow_id=workflow.id,
+                step_id=step_id,
+                step_type=step_type,
+            )
 
         run.status = "completed"
         run.context = context
         run.current_step = None
         run.completed_at = datetime.now(timezone.utc)
         await db.commit()
+        logger.info("run.completed", run_id=run_id, workflow_id=workflow.id)
     except Exception as exc:
         run.status = "failed"
         run.error = str(exc)
         run.context = context
         await db.commit()
+        logger.exception("run.failed", run_id=run_id, workflow_id=workflow.id, error=str(exc))
 
 
 async def resume_run(run_id: str, step_id: str, db: AsyncSession) -> None:
@@ -171,4 +213,5 @@ async def resume_run(run_id: str, step_id: str, db: AsyncSession) -> None:
     if run is not None:
         run.status = "pending"
     await db.commit()
+    logger.info("run.retrying", run_id=run_id, step_id=step_id)
     await execute_run(run_id, db)

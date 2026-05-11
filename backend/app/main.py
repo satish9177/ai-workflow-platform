@@ -2,18 +2,23 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import inspect
-import logging
+import time
+import uuid
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 from croniter import croniter
 from sqlalchemy import select
+import structlog
 
 from app.config import settings
 from app.database import AsyncSessionLocal
+from app.logging import configure_logging
 from app.models.run import Run
 from app.models.workflow import Workflow
 from app.routers.approvals import router as approvals_router
@@ -24,7 +29,32 @@ from app.routers.webhooks import router as webhooks_router
 from app.routers.workflows import router as workflows_router
 
 
-logger = logging.getLogger(__name__)
+configure_logging(settings.log_level)
+logger = structlog.get_logger(__name__)
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        started_at = time.perf_counter()
+        status_code = 500
+
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            logger.info(
+                "request.completed",
+                method=request.method,
+                path=request.url.path,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                request_id=request_id,
+            )
+            if "response" in locals():
+                response.headers["X-Request-ID"] = request_id
 
 
 async def enqueue_execute_workflow(run_id: str) -> None:
@@ -88,7 +118,7 @@ async def _poll_cron_triggers() -> None:
                     workflow.trigger_config = trigger_config
                     await db.commit()
             except Exception:
-                logger.exception("Failed polling cron workflow %s", workflow.id)
+                logger.exception("cron.poll_failed", workflow_id=workflow.id)
 
 
 @asynccontextmanager
@@ -104,9 +134,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="Workflow Platform", lifespan=lifespan)
 
+app.add_middleware(RequestLoggingMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
