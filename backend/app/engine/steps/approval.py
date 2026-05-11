@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import create_approval_token
 from app.config import settings
 from app.models.approval import Approval
+from app.utils.template_renderer import render_template_object
 
 
 class ApprovalRequiredException(Exception):
@@ -23,21 +24,23 @@ async def run_approval_step(
     run_id: str,
     db: AsyncSession,
 ) -> None:
+    rendered_step = render_template_object(step, context)
+    approver_email = rendered_step.get("approver_email") or rendered_step.get("approver_email_template")
     approval = Approval(
         run_id=run_id,
-        step_id=step["id"],
+        step_id=rendered_step["id"],
         token=f"pending-{uuid.uuid4()}",
         context=context,
-        approver_email=step["approver_email"],
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=step.get("expires_hours", 24)),
+        approver_email=approver_email,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=rendered_step.get("expires_hours", 24)),
     )
     db.add(approval)
     await db.flush()
 
-    approval.token = create_approval_token(approval.id, approval.approver_email, step.get("expires_hours", 24))
+    approval.token = create_approval_token(approval.id, approval.approver_email, rendered_step.get("expires_hours", 24))
     await db.commit()
     await db.refresh(approval)
-    _send_approval_email(approval, step, context)
+    _send_approval_email(approval, rendered_step, context)
     raise ApprovalRequiredException(approval.id)
 
 
@@ -51,11 +54,12 @@ def _send_approval_email(approval: Approval, step: dict[str, Any], context: dict
     message = EmailMessage()
     message["From"] = settings.smtp_from_email
     message["To"] = approval.approver_email
-    message["Subject"] = step.get("subject", "Workflow approval required")
+    rendered_step = render_template_object(step, context)
+    message["Subject"] = rendered_step.get("subject", "Workflow approval required")
     message.set_content(
         "\n".join(
             [
-                step.get("body", "A workflow step requires your approval."),
+                rendered_step.get("body", "A workflow step requires your approval."),
                 "",
                 f"Approve: {approve_url}",
                 f"Reject: {reject_url}",
