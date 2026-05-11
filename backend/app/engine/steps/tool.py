@@ -2,13 +2,13 @@ import base64
 from typing import Any
 
 from cryptography.fernet import Fernet
-from jinja2 import Template
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.integration import Integration
 from app.tools.registry import ToolRegistry
+from app.utils.template_renderer import render_template_object
 
 
 async def get_credentials(db: AsyncSession, tool_name: str) -> dict[str, Any]:
@@ -31,12 +31,12 @@ async def get_credentials(db: AsyncSession, tool_name: str) -> dict[str, Any]:
 
 
 def render_params(params: Any, context: dict[str, Any]) -> Any:
-    if isinstance(params, str):
-        return Template(params).render(**context)
-    if isinstance(params, dict):
-        return {key: render_params(value, context) for key, value in params.items()}
-    if isinstance(params, list):
-        return [render_params(item, context) for item in params]
+    return render_template_object(params, context)
+
+
+def _prepare_tool_params(tool_name: str, params: Any) -> Any:
+    if tool_name == "http_request" and isinstance(params, dict) and "json" in params and "body" not in params:
+        return {**params, "body": params["json"]}
     return params
 
 
@@ -44,7 +44,8 @@ async def run_tool_step(step: dict[str, Any], context: dict[str, Any], db: Async
     tool_name = step.get("tool_name") or step.get("tool") or step.get("type")
     action = step.get("action", "execute")
     raw_params = step.get("params") or step.get("config") or {}
-    params = render_params(raw_params, context)
+    rendered_params = render_params(raw_params, context)
+    params = _prepare_tool_params(tool_name, rendered_params)
     credentials = await get_credentials(db, tool_name)
 
     result = await ToolRegistry.execute(tool_name, action, params, credentials)
