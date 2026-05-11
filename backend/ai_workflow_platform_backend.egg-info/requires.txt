@@ -10,12 +10,15 @@ arq==0.26.1
 redis
 httpx
 openai
+anthropic
+google-generativeai
 simpleeval
 apscheduler
 jinja2
 cryptography
 structlog
 croniter
+email-validator
 
 [dev]
 pytest

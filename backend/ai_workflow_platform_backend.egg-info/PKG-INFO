@@ -15,12 +15,15 @@ Requires-Dist: arq==0.26.1
 Requires-Dist: redis
 Requires-Dist: httpx
 Requires-Dist: openai
+Requires-Dist: anthropic
+Requires-Dist: google-generativeai
 Requires-Dist: simpleeval
 Requires-Dist: apscheduler
 Requires-Dist: jinja2
 Requires-Dist: cryptography
 Requires-Dist: structlog
 Requires-Dist: croniter
+Requires-Dist: email-validator
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: pytest-asyncio; extra == "dev"
