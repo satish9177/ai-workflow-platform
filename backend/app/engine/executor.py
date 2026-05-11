@@ -125,6 +125,8 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
             if existing is not None and existing.status == "completed":
                 if existing.output is not None:
                     context[step_id] = existing.output
+                    if step.get("output_as"):
+                        context[step["output_as"]] = existing.output
                 continue
 
             logger.info(
@@ -168,6 +170,8 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
 
             normalized_output = output if isinstance(output, dict) else {"result": output}
             context[step_id] = normalized_output
+            if step.get("output_as"):
+                context[step["output_as"]] = normalized_output
             await _upsert_step(
                 db,
                 run_id,

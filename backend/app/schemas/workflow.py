@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 ALLOWED_STEP_TYPES = {"llm", "tool", "approval", "condition"}
+ALLOWED_LLM_PROVIDERS = {"openai", "anthropic", "gemini", "mock"}
 
 
 def validate_workflow_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -21,7 +22,20 @@ def validate_workflow_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]
             allowed = ", ".join(sorted(ALLOWED_STEP_TYPES))
             raise ValueError(f"{step_label}: type must be one of: {allowed}")
 
-        if step_type == "tool":
+        if step_type == "llm":
+            if not step.get("prompt"):
+                raise ValueError(f"{step_label}: prompt is required for llm steps")
+            provider = step.get("provider")
+            if provider is not None and provider not in ALLOWED_LLM_PROVIDERS:
+                allowed = ", ".join(sorted(ALLOWED_LLM_PROVIDERS))
+                raise ValueError(f"{step_label}: provider must be one of: {allowed}")
+            temperature = step.get("temperature")
+            if temperature is not None and not 0 <= temperature <= 2:
+                raise ValueError(f"{step_label}: temperature must be between 0 and 2")
+            max_tokens = step.get("max_tokens")
+            if max_tokens is not None and max_tokens <= 0:
+                raise ValueError(f"{step_label}: max_tokens must be greater than 0")
+        elif step_type == "tool":
             if not step.get("tool"):
                 raise ValueError(f"{step_label}: tool is required for tool steps")
             if not step.get("action"):
