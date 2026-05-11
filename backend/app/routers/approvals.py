@@ -87,7 +87,7 @@ async def approve(
 ) -> Approval:
     approval = await _approval_from_token(token, db)
     if approval.status != "pending":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval already responded")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval is not pending")
 
     approval.status = "approved"
     approval.responded_at = _now()
@@ -105,7 +105,7 @@ async def reject(
 ) -> Approval:
     approval = await _approval_from_token(token, db)
     if approval.status != "pending":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval already responded")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval is not pending")
 
     now = _now()
     approval.status = "rejected"

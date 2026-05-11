@@ -29,7 +29,7 @@ async def test_cron_poll_creates_run_when_due(monkeypatch):
     async with TestingSessionLocal() as db:
         workflow = Workflow(
             name="Cron workflow",
-            steps=[{"id": "fetch", "type": "http_request", "config": {"url": "https://example.test"}}],
+            steps=[{"id": "fetch", "type": "tool", "tool": "http_request", "action": "execute", "params": {"url": "https://example.test"}}],
             trigger_type="cron",
             trigger_config={"cron": "* * * * *", "last_run": last_run.isoformat()},
             is_active=True,
@@ -63,7 +63,7 @@ async def test_invalid_cron_does_not_crash_poller(monkeypatch):
     async with TestingSessionLocal() as db:
         workflow = Workflow(
             name="Invalid cron workflow",
-            steps=[{"id": "fetch", "type": "http_request", "config": {"url": "https://example.test"}}],
+            steps=[{"id": "fetch", "type": "tool", "tool": "http_request", "action": "execute", "params": {"url": "https://example.test"}}],
             trigger_type="cron",
             trigger_config={"cron": "not a cron"},
             is_active=True,

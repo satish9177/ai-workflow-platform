@@ -104,12 +104,14 @@ async def test_expired_token(client):
     response = await client.post(f"/api/v1/approvals/{token}/approve")
 
     assert response.status_code == 410
+    assert response.json()["detail"] == "Approval expired"
 
 
 async def test_invalid_token(client):
     response = await client.post("/api/v1/approvals/garbage-token/approve")
 
     assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid approval token"
 
 
 async def test_webhook_valid_token_creates_queued_run(client, monkeypatch):

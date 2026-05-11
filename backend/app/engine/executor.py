@@ -60,6 +60,18 @@ def _step_type(step: dict[str, Any]) -> str:
     return step.get("type") or step.get("step_type") or ""
 
 
+def _validate_step_for_execution(step: dict[str, Any]) -> tuple[str, str]:
+    step_id = step.get("id")
+    if not step_id:
+        raise ValueError("Invalid workflow step: missing id")
+
+    step_type = _step_type(step)
+    if not step_type:
+        raise ValueError("Invalid workflow step: missing type")
+
+    return step_id, step_type
+
+
 async def _dispatch_step(
     step: dict[str, Any],
     context: dict[str, Any],
@@ -101,8 +113,7 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
 
     try:
         for step in workflow.steps:
-            step_id = step["id"]
-            step_type = _step_type(step)
+            step_id, step_type = _validate_step_for_execution(step)
             existing = await _get_existing_step(db, run_id, step_id)
             if existing is not None and existing.status == "completed":
                 if existing.output is not None:

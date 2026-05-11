@@ -46,6 +46,30 @@ async def test_create_workflow(client, auth_headers, sample_workflow):
     assert data["steps"] == sample_workflow["steps"]
 
 
+async def test_create_workflow_step_missing_id_returns_422(client, auth_headers, sample_workflow):
+    payload = {
+        **sample_workflow,
+        "steps": [{"type": "tool", "tool": "http_request", "action": "execute", "params": {"url": "https://example.test"}}],
+    }
+
+    response = await create_workflow(client, auth_headers, payload)
+
+    assert response.status_code == 422
+    assert "id is required" in response.text
+
+
+async def test_create_workflow_invalid_step_type_returns_422(client, auth_headers, sample_workflow):
+    payload = {
+        **sample_workflow,
+        "steps": [{"id": "bad", "type": "http_request", "config": {"url": "https://example.test"}}],
+    }
+
+    response = await create_workflow(client, auth_headers, payload)
+
+    assert response.status_code == 422
+    assert "type must be one of" in response.text
+
+
 async def test_list_workflows(client, auth_headers, sample_workflow):
     await create_workflow(client, auth_headers, {**sample_workflow, "name": "First"})
     await create_workflow(client, auth_headers, {**sample_workflow, "name": "Second"})

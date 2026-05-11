@@ -78,8 +78,10 @@ def sample_workflow() -> dict:
         "steps": [
             {
                 "id": "fetch",
-                "type": "http_request",
-                "config": {"method": "GET", "url": "https://example.com"},
+                "type": "tool",
+                "tool": "http_request",
+                "action": "execute",
+                "params": {"method": "GET", "url": "https://example.com"},
             }
         ],
         "trigger_type": "manual",
