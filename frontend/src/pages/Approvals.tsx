@@ -1,27 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { api } from "../api/client";
-
-type Approval = {
-  id: string;
-  run_id: string;
-  step_id: string;
-  status: string;
-  context?: Record<string, unknown> | null;
-  approver_email: string;
-  expires_at: string;
-  token?: string;
-};
-
-function contextPreview(context?: Record<string, unknown> | null) {
-  if (!context) {
-    return "{}";
-  }
-  return JSON.stringify(context).slice(0, 160);
-}
+import { api, getErrorMessage } from "../api/client";
+import type { Approval } from "../types/api";
+import { formatDate } from "../utils/date";
+import { previewJson } from "../utils/json";
 
 export default function Approvals() {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, error, isLoading, refetch } = useQuery({
     queryKey: ["approvals"],
     queryFn: async () => (await api.get<Approval[]>("/api/v1/approvals/pending")).data,
     refetchInterval: 10000,
@@ -45,7 +30,8 @@ export default function Approvals() {
         <h2 className="text-2xl font-semibold">Pending Approvals</h2>
         <p className="text-sm text-slate-500">Developer-only approval queue.</p>
       </div>
-      {isLoading && <div className="card">Loading approvals...</div>}
+      {isLoading && <div className="card">Loading...</div>}
+      {error && <div className="card text-sm text-red-700">{getErrorMessage(error)}</div>}
       <div className="grid gap-4">
         {data?.map((approval) => (
           <article className="card space-y-3" key={approval.id}>
@@ -56,8 +42,8 @@ export default function Approvals() {
               </div>
               <span className="badge-yellow">{approval.status}</span>
             </div>
-            <p className="text-sm text-slate-600">Expires: {new Date(approval.expires_at).toLocaleString()}</p>
-            <pre className="overflow-auto rounded-md bg-slate-100 p-3 text-xs">{contextPreview(approval.context)}</pre>
+            <p className="text-sm text-slate-600">Expires: {formatDate(approval.expires_at)}</p>
+            <pre className="overflow-auto rounded-md bg-slate-100 p-3 text-xs">{previewJson(approval.context, 160) || "{}"}</pre>
             {!approval.token && <p className="text-sm text-red-700">Token not exposed by API</p>}
             <div className="flex gap-2">
               <button className="btn-primary" disabled={!approval.token} onClick={() => approval.token && approve(approval.token)}>
@@ -69,7 +55,7 @@ export default function Approvals() {
             </div>
           </article>
         ))}
-        {data?.length === 0 && <div className="card">No pending approvals.</div>}
+        {!isLoading && !error && data?.length === 0 && <div className="card">No pending approvals</div>}
       </div>
     </section>
   );

@@ -1,26 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
-import { api } from "../api/client";
-
-type Run = {
-  id: string;
-  workflow_id: string;
-  status: string;
-  created_at: string;
-};
-
-const statusClass: Record<string, string> = {
-  pending: "badge-gray",
-  running: "badge-blue",
-  paused: "badge-yellow",
-  completed: "badge-green",
-  failed: "badge-red",
-  cancelled: "badge-gray",
-};
+import { api, getErrorMessage } from "../api/client";
+import StatusBadge from "../components/StatusBadge";
+import type { Run } from "../types/api";
+import { formatDate } from "../utils/date";
 
 export default function Runs() {
-  const { data, isLoading } = useQuery({
+  const { data, error, isLoading } = useQuery({
     queryKey: ["runs"],
     queryFn: async () => (await api.get<Run[]>("/api/v1/runs?limit=50")).data,
     refetchInterval: 5000,
@@ -32,6 +19,8 @@ export default function Runs() {
         <h2 className="text-2xl font-semibold">Runs</h2>
         <p className="text-sm text-slate-500">Recent workflow execution history.</p>
       </div>
+      {isLoading && <div className="card">Loading...</div>}
+      {error && <div className="card text-sm text-red-700">{getErrorMessage(error)}</div>}
       <div className="card overflow-hidden p-0">
         <table className="w-full border-collapse">
           <thead>
@@ -43,18 +32,13 @@ export default function Runs() {
             </tr>
           </thead>
           <tbody>
-            {isLoading && (
-              <tr>
-                <td className="table-cell" colSpan={4}>Loading runs...</td>
-              </tr>
-            )}
             {data?.map((run) => (
               <tr key={run.id}>
                 <td className="table-cell">
-                  <span className={statusClass[run.status] || "badge-gray"}>{run.status}</span>
+                  <StatusBadge status={run.status} />
                 </td>
                 <td className="table-cell font-mono text-xs">{run.workflow_id}</td>
-                <td className="table-cell">{new Date(run.created_at).toLocaleString()}</td>
+                <td className="table-cell">{formatDate(run.created_at)}</td>
                 <td className="table-cell">
                   <Link className="text-sm font-medium text-blue-700 hover:underline" to={`/runs/${run.id}`}>
                     View
@@ -62,6 +46,11 @@ export default function Runs() {
                 </td>
               </tr>
             ))}
+            {!isLoading && !error && data?.length === 0 && (
+              <tr>
+                <td className="table-cell" colSpan={4}>No runs found</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

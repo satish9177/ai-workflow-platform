@@ -1,50 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
-import { api } from "../api/client";
-
-type StepResult = {
-  id: string;
-  step_id: string;
-  step_type: string;
-  status: string;
-  output?: unknown;
-  duration_ms?: number | null;
-};
-
-type RunDetailResponse = {
-  id: string;
-  workflow_id: string;
-  status: string;
-  error?: string | null;
-  started_at?: string | null;
-  completed_at?: string | null;
-  step_results: StepResult[];
-};
-
-const statusClass: Record<string, string> = {
-  pending: "badge-gray",
-  running: "badge-blue",
-  paused: "badge-yellow",
-  completed: "badge-green",
-  failed: "badge-red",
-  cancelled: "badge-gray",
-};
-
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : "-";
-}
-
-function preview(output: unknown) {
-  if (output == null) {
-    return "";
-  }
-  return JSON.stringify(output).slice(0, 100);
-}
+import { api, getErrorMessage } from "../api/client";
+import StatusBadge from "../components/StatusBadge";
+import type { RunDetail as RunDetailResponse } from "../types/api";
+import { formatDate } from "../utils/date";
+import { previewJson } from "../utils/json";
 
 export default function RunDetail() {
   const { id } = useParams();
-  const { data, refetch } = useQuery({
+  const { data, error, isLoading, refetch } = useQuery({
     queryKey: ["run", id],
     queryFn: async () => (await api.get<RunDetailResponse>(`/api/v1/runs/${id}`)).data,
     enabled: Boolean(id),
@@ -70,10 +35,12 @@ export default function RunDetail() {
         <h2 className="text-2xl font-semibold">Run Detail</h2>
         <p className="font-mono text-xs text-slate-500">{id}</p>
       </div>
+      {isLoading && <div className="card">Loading...</div>}
+      {error && <div className="card text-sm text-red-700">{getErrorMessage(error)}</div>}
       <div className="card space-y-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Status</span>
-          <span className={statusClass[data?.status || "pending"] || "badge-gray"}>{data?.status || "loading"}</span>
+          <StatusBadge status={data?.status} />
         </div>
         <p className="text-sm text-slate-600">Started: {formatDate(data?.started_at)}</p>
         <p className="text-sm text-slate-600">Completed: {formatDate(data?.completed_at)}</p>
@@ -105,7 +72,7 @@ export default function RunDetail() {
                 <td className="table-cell">{step.step_type}</td>
                 <td className="table-cell">{step.status}</td>
                 <td className="table-cell">{step.duration_ms ?? "-"}</td>
-                <td className="table-cell max-w-md font-mono text-xs">{preview(step.output)}</td>
+                <td className="table-cell max-w-md font-mono text-xs">{previewJson(step.output)}</td>
               </tr>
             ))}
             {data?.step_results?.length === 0 && (

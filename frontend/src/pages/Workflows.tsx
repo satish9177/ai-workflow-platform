@@ -1,18 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { api } from "../api/client";
-
-type Workflow = {
-  id: string;
-  name: string;
-  trigger_type: string;
-  is_active: boolean;
-  created_at: string;
-  steps: Record<string, unknown>[];
-};
+import { api, getErrorMessage } from "../api/client";
+import type { Workflow } from "../types/api";
+import { formatDate } from "../utils/date";
 
 export default function Workflows() {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, error, isLoading, refetch } = useQuery({
     queryKey: ["workflows"],
     queryFn: async () => (await api.get<Workflow[]>("/api/v1/workflows")).data,
     refetchInterval: 10000,
@@ -34,6 +27,8 @@ export default function Workflows() {
         <h2 className="text-2xl font-semibold">Workflows</h2>
         <p className="text-sm text-slate-500">Create workflows through the API, then manage them here.</p>
       </div>
+      {isLoading && <div className="card">Loading...</div>}
+      {error && <div className="card text-sm text-red-700">{getErrorMessage(error)}</div>}
       <div className="card overflow-hidden p-0">
         <table className="w-full border-collapse">
           <thead>
@@ -46,11 +41,6 @@ export default function Workflows() {
             </tr>
           </thead>
           <tbody>
-            {isLoading && (
-              <tr>
-                <td className="table-cell" colSpan={5}>Loading workflows...</td>
-              </tr>
-            )}
             {data?.map((workflow) => (
               <tr key={workflow.id}>
                 <td className="table-cell font-medium">{workflow.name}</td>
@@ -60,7 +50,7 @@ export default function Workflows() {
                     {workflow.is_active ? "active" : "inactive"}
                   </span>
                 </td>
-                <td className="table-cell">{new Date(workflow.created_at).toLocaleString()}</td>
+                <td className="table-cell">{formatDate(workflow.created_at)}</td>
                 <td className="table-cell">
                   <div className="flex gap-2">
                     <button className="btn-secondary" onClick={() => triggerRun(workflow.id)}>Trigger Run</button>
@@ -69,6 +59,11 @@ export default function Workflows() {
                 </td>
               </tr>
             ))}
+            {!isLoading && !error && data?.length === 0 && (
+              <tr>
+                <td className="table-cell" colSpan={5}>No workflows found</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
