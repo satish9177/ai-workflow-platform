@@ -58,3 +58,13 @@ export type LoginResponse = {
   access_token: string;
   token_type: string;
 };
+
+export type LlmProvider = {
+  id: string;
+  name: string;
+};
+
+export type LlmProviderModels = {
+  provider: string;
+  models: string[];
+};
