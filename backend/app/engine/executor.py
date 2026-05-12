@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -76,6 +77,28 @@ def _validate_step_for_execution(step: dict[str, Any]) -> tuple[str, str]:
     return step_id, step_type
 
 
+def _get_retry_config(step: dict[str, Any]) -> tuple[int, float]:
+    retry = step.get("retry", {})
+    if not isinstance(retry, dict):
+        retry = {}
+
+    try:
+        max_attempts = int(retry.get("max_attempts", 1))
+    except (TypeError, ValueError):
+        max_attempts = 1
+    if max_attempts < 1:
+        max_attempts = 1
+
+    try:
+        backoff_seconds = float(retry.get("backoff_seconds", 0.0))
+    except (TypeError, ValueError):
+        backoff_seconds = 0.0
+    if backoff_seconds < 0:
+        backoff_seconds = 0.0
+
+    return max_attempts, backoff_seconds
+
+
 async def _dispatch_step(
     step: dict[str, Any],
     context: dict[str, Any],
@@ -92,6 +115,32 @@ async def _dispatch_step(
     if step_type == "tool" or ToolRegistry.get(step_type) is not None:
         return await run_tool_step(step, context, db)
     raise ValueError(f"Unsupported step type: {step_type}")
+
+
+async def _execute_step_with_retry(
+    step: dict[str, Any],
+    context: dict[str, Any],
+    run_id: str,
+    db: AsyncSession,
+) -> Any:
+    step_type = _step_type(step)
+    if step_type not in {"tool", "llm"}:
+        return await _dispatch_step(step, context, run_id, db)
+    if "retry" not in step:
+        return await _dispatch_step(step, context, run_id, db)
+
+    max_attempts, backoff_seconds = _get_retry_config(step)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await _dispatch_step(step, context, run_id, db)
+        except Exception as exc:
+            if attempt >= max_attempts:
+                raise Exception(
+                    f"Failed after {attempt}/{max_attempts} attempts. Last error: {exc}"
+                ) from exc
+            await asyncio.sleep(backoff_seconds)
+
+    raise RuntimeError("Retry execution ended unexpectedly")
 
 
 async def execute_run(run_id: str, db: AsyncSession) -> None:
@@ -141,7 +190,10 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
             await db.commit()  
 
             try:
-                output = await _dispatch_step(step, context, run_id, db)
+                if step_type in {"tool", "llm"}:
+                    output = await _execute_step_with_retry(step, context, run_id, db)
+                else:
+                    output = await _dispatch_step(step, context, run_id, db)
             except ApprovalRequiredException:
                 await _upsert_step(db, run_id, step_id, step_type, "paused", input=step)
                 run.status = "paused"
