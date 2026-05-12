@@ -25,6 +25,7 @@ from app.models.workflow import Workflow
 from app.routers.approvals import router as approvals_router
 from app.routers.auth import router as auth_router
 from app.routers.integrations import router as integrations_router
+from app.routers.llm import router as llm_router
 from app.routers.runs import router as runs_router
 from app.routers.webhooks import router as webhooks_router
 from app.routers.workflows import router as workflows_router
@@ -151,6 +152,7 @@ app.include_router(workflows_router, prefix="/api/v1/workflows")
 app.include_router(runs_router, prefix="/api/v1/runs")
 app.include_router(approvals_router, prefix="/api/v1/approvals")
 app.include_router(integrations_router, prefix="/api/v1/integrations")
+app.include_router(llm_router, prefix="/api/v1/llm", tags=["llm"])
 app.include_router(webhooks_router, prefix="/webhooks")
 
 

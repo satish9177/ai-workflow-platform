@@ -4,6 +4,7 @@ from app.llm.types import LLMRequest, LLMResponse
 
 class MockLLMProvider(BaseLLMProvider):
     provider_name = "mock"
+    display_name = "Mock"
     default_model = "mock-model"
 
     def __init__(self) -> None:

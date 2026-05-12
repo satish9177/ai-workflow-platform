@@ -3,6 +3,7 @@ import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom"
 
 import Approvals from "./pages/Approvals";
 import Login from "./pages/Login";
+import Providers from "./pages/Providers";
 import RunDetail from "./pages/RunDetail";
 import Runs from "./pages/Runs";
 import Workflows from "./pages/Workflows";
@@ -41,6 +42,9 @@ function Layout({ children }: { children: ReactNode }) {
             <NavLink className={({ isActive }) => (isActive ? "nav-link-active" : "nav-link")} to="/approvals">
               Approvals
             </NavLink>
+            <NavLink className={({ isActive }) => (isActive ? "nav-link-active" : "nav-link")} to="/providers">
+              Providers
+            </NavLink>
             <button className="btn-secondary" onClick={logout}>
               Logout
             </button>
@@ -68,6 +72,7 @@ export default function App() {
       <Route path="/runs/:id" element={<ProtectedPage><RunDetail /></ProtectedPage>} />
       <Route path="/workflows" element={<ProtectedPage><Workflows /></ProtectedPage>} />
       <Route path="/approvals" element={<ProtectedPage><Approvals /></ProtectedPage>} />
+      <Route path="/providers" element={<ProtectedPage><Providers /></ProtectedPage>} />
       <Route path="/" element={<Navigate to="/runs" replace />} />
     </Routes>
   );
