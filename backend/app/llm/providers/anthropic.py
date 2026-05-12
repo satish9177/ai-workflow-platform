@@ -15,6 +15,7 @@ from app.llm.types import LLMRequest, LLMResponse, LLMUsage
 
 class AnthropicProvider(BaseLLMProvider):
     provider_name = "anthropic"
+    display_name = "Anthropic"
     default_model = "claude-3-5-sonnet-latest"
 
     def __init__(self, api_key: str):

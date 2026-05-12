@@ -15,6 +15,7 @@ from app.llm.types import LLMRequest, LLMResponse, LLMUsage
 
 class GeminiProvider(BaseLLMProvider):
     provider_name = "gemini"
+    display_name = "Google Gemini"
     default_model = "gemini-1.5-flash"
 
     def __init__(self, api_key: str):
