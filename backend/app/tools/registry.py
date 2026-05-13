@@ -37,6 +37,7 @@ class ToolRegistry:
 def _register_all() -> None:
     from app.tools.http_request import HttpRequestTool
     from app.tools.integrations.discord import DiscordTool
+    from app.tools.integrations.email_tool import EmailTool
     from app.tools.integrations.slack import SlackTool
     from app.tools.smtp_email import SmtpEmailTool
     from app.tools.whatsapp import WhatsAppTool
@@ -46,6 +47,7 @@ def _register_all() -> None:
     ToolRegistry.register(WhatsAppTool())
     ToolRegistry.register(SlackTool())
     ToolRegistry.register(DiscordTool())
+    ToolRegistry.register(EmailTool())
 
 
 _register_all()

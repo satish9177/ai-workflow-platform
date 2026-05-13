@@ -1,4 +1,5 @@
 from typing import Any
+from urllib.parse import urlparse
 
 from app.tools.base import BaseTool, ToolResult
 from app.tools.integrations._http import _post
@@ -40,3 +41,24 @@ class SlackTool(BaseTool):
             return ToolResult(success=False, error=str(exc))
 
         return ToolResult(success=True, data={"sent": True})
+
+    async def test_connection(self, credentials: dict[str, Any]) -> ToolResult:
+        webhook_url = credentials.get("webhook_url")
+        if not isinstance(webhook_url, str) or not webhook_url.strip():
+            return ToolResult(success=False, error="webhook_url missing from credentials")
+        parsed = urlparse(webhook_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ToolResult(success=False, error="Invalid webhook URL")
+
+        try:
+            await _post(
+                webhook_url,
+                {
+                    "text": "Workflow Platform connection test",
+                    "username": "Workflow Bot",
+                },
+            )
+        except RuntimeError as exc:
+            return ToolResult(success=False, error=str(exc))
+
+        return ToolResult(success=True, data={"connected": True})

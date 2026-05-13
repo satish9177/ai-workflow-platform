@@ -11,9 +11,10 @@ from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.run import Run
+from app.models.step_execution import StepExecution
 from app.models.step_result import StepResult
 from app.models.user import User
-from app.schemas.run import RunDetail, RunRead
+from app.schemas.run import RunDetail, RunRead, RunTimelineRead
 
 
 router = APIRouter(tags=["runs"])
@@ -65,6 +66,26 @@ async def get_run(
     run_data = RunRead.model_validate(run).model_dump()
     run_data["step_results"] = list(result.scalars().all())
     return run_data
+
+
+@router.get("/{run_id}/timeline", response_model=RunTimelineRead)
+async def get_run_timeline(
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    run = await db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    result = await db.execute(
+        select(StepExecution)
+        .where(StepExecution.run_id == run_id)
+        .order_by(StepExecution.step_index.asc(), StepExecution.created_at.asc())
+    )
+    steps = list(result.scalars().all())
+    failed_step = next((step for step in steps if step.status == "failed"), None)
+    return {"run": run, "steps": steps, "failed_step_key": failed_step.step_key if failed_step else None}
 
 
 @router.post("/{id}/cancel", response_model=RunRead)

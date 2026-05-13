@@ -17,9 +17,9 @@ export default function TemplateDetailPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { data: integrations } = useQuery({
     queryKey: ["integrations"],
-    queryFn: fetchIntegrations,
+    queryFn: () => fetchIntegrations(),
   });
-  const configured = new Set(integrations?.filter((item) => item.has_credentials).map((item) => item.name) || []);
+  const configured = new Set(integrations?.filter((item) => item.credentials_set).map((item) => item.integration_type) || []);
 
   if (!template) {
     return (

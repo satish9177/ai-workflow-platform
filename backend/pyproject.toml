@@ -26,6 +26,7 @@ dependencies = [
     "structlog",
     "croniter",
     "email-validator",
+    "aiosmtplib",
 ]
 
 [project.optional-dependencies]
