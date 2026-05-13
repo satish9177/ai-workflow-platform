@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 
 import { api, getErrorMessage } from "../api/client";
+import WorkflowStepEditor from "../components/workflow/WorkflowStepEditor";
 import type { Workflow } from "../types/api";
 import { buildTriggerPayload, cronToLabel, SCHEDULE_PRESETS } from "../utils/schedule";
 
@@ -12,6 +13,9 @@ export default function WorkflowDetailPage() {
   const [selectedPreset, setSelectedPreset] = useState(SCHEDULE_PRESETS[0].cron);
   const [customCron, setCustomCron] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
+  const [webhookError, setWebhookError] = useState("");
+  const [webhookCopied, setWebhookCopied] = useState(false);
   const { data: workflow, error, isLoading, refetch } = useQuery({
     queryKey: ["workflow", id],
     queryFn: async () => (await api.get<Workflow>(`/api/v1/workflows/${id}`)).data,
@@ -50,6 +54,45 @@ export default function WorkflowDetailPage() {
     await refetch();
   }
 
+  async function saveWebhookSecret(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!workflow) {
+      return;
+    }
+
+    const secret = webhookSecret.trim();
+    const triggerConfig = { ...(workflow.trigger_config || {}) };
+    if (secret) {
+      triggerConfig.secret = secret;
+    } else {
+      delete triggerConfig.secret;
+    }
+
+    try {
+      setWebhookError("");
+      await api.put(`/api/v1/workflows/${workflow.id}`, {
+        name: workflow.name,
+        description: workflow.description,
+        steps: workflow.steps,
+        trigger_type: "webhook",
+        trigger_config: triggerConfig,
+      });
+      setWebhookSecret("");
+      await refetch();
+    } catch (error) {
+      setWebhookError(getErrorMessage(error));
+    }
+  }
+
+  async function copyWebhookUrl(webhookUrl: string) {
+    if (!navigator.clipboard) {
+      return;
+    }
+    await navigator.clipboard.writeText(webhookUrl);
+    setWebhookCopied(true);
+    window.setTimeout(() => setWebhookCopied(false), 1200);
+  }
+
   async function removeSchedule() {
     try {
       setErrorMessage("");
@@ -86,6 +129,8 @@ export default function WorkflowDetailPage() {
   }
 
   const currentCron = String(workflow.trigger_config?.cron_expression || workflow.trigger_config?.cron || "");
+  const webhookUrl = `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/v1/webhooks/${workflow.webhook_id}`;
+  const webhookSecretConfigured = Boolean(workflow.trigger_config?.secret);
 
   return (
     <section className="space-y-4">
@@ -98,6 +143,8 @@ export default function WorkflowDetailPage() {
         {workflow.description && <p className="text-sm text-slate-500">{workflow.description}</p>}
         <p className="text-sm text-slate-600">Trigger: {workflow.trigger_type}</p>
       </div>
+
+      <WorkflowStepEditor workflow={workflow} onSaved={refetch} />
 
       <div className="card space-y-4">
         <div>
@@ -175,6 +222,71 @@ export default function WorkflowDetailPage() {
         )}
 
         {!showForm && errorMessage && <p className="text-sm text-red-700">{errorMessage}</p>}
+      </div>
+
+      <div className="card space-y-4">
+        <div>
+          <h3 className="text-lg font-semibold">Webhook Trigger</h3>
+          <p className="text-sm text-slate-600">External systems can POST JSON to this endpoint to trigger the workflow.</p>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-slate-700">Webhook URL</p>
+          <div className="flex flex-wrap gap-2">
+            <code className="rounded bg-slate-100 px-3 py-2 text-xs text-slate-700">{webhookUrl}</code>
+            <button className="btn-secondary" onClick={() => copyWebhookUrl(webhookUrl)} type="button">
+              {webhookCopied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          {workflow.trigger_type !== "webhook" && (
+            <p className="text-sm text-amber-700">Save a webhook secret below to switch this workflow to webhook trigger mode.</p>
+          )}
+        </div>
+
+        <form className="space-y-3" onSubmit={saveWebhookSecret}>
+          <div className="space-y-1">
+            <label className="text-sm font-medium text-slate-700" htmlFor="webhook-secret">
+              Optional webhook secret
+            </label>
+            <input
+              className="input"
+              id="webhook-secret"
+              onChange={(event) => setWebhookSecret(event.target.value)}
+              placeholder={webhookSecretConfigured ? "Enter a new secret to replace or leave blank to remove" : "abc123"}
+              type="password"
+              value={webhookSecret}
+            />
+            <p className="text-sm text-slate-500">
+              When configured, callers must send X-Webhook-Secret with the same value.
+            </p>
+          </div>
+          {webhookError && <p className="text-sm text-red-700">{webhookError}</p>}
+          <button className="btn-primary" type="submit">
+            {webhookSecretConfigured ? "Update webhook settings" : "Enable webhook trigger"}
+          </button>
+        </form>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-slate-700">Example request</p>
+          <pre className="overflow-auto rounded-md bg-slate-100 p-3 text-xs text-slate-700">
+{`curl -X POST "${webhookUrl}" \\
+  -H "Content-Type: application/json" \\
+  -H "X-Webhook-Secret: ${webhookSecretConfigured ? "<your-secret>" : "optional"}" \\
+  -d '{"event":"created","source":"custom-app"}'`}
+          </pre>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-slate-700">Use webhook data in workflow templates</p>
+          <p className="text-sm text-slate-500">
+            Webhook payloads are available as trigger_data in LLM prompts, tool params, and approval messages.
+          </p>
+          <pre className="overflow-auto rounded-md bg-slate-100 p-3 text-xs text-slate-700">
+{`{{ trigger_data.body.message }}
+{{ trigger_data.headers.x_github_event }}
+{{ trigger_data.query_params.customer_id }}`}
+          </pre>
+        </div>
       </div>
     </section>
   );

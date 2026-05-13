@@ -8,7 +8,7 @@ export default function Integrations() {
   const queryClient = useQueryClient();
   const { data, error, isLoading } = useQuery({
     queryKey: ["integrations"],
-    queryFn: fetchIntegrations,
+    queryFn: () => fetchIntegrations(),
   });
 
   return (
@@ -26,9 +26,9 @@ export default function Integrations() {
           {KNOWN_INTEGRATIONS.map((config) => (
             <IntegrationCard
               config={config}
+              integrations={(data || []).filter((item) => item.id && item.integration_type === config.id)}
               key={config.id}
               onSaveSuccess={() => queryClient.invalidateQueries({ queryKey: ["integrations"] })}
-              serverData={data?.find((item) => item.name === config.id)}
             />
           ))}
         </div>

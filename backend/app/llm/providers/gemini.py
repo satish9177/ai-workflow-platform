@@ -74,16 +74,16 @@ def _map_gemini_error(exc: Exception) -> LLMError:
     status_code = _status_code(exc)
     class_name = exc.__class__.__name__.lower()
     if "resourceexhausted" in class_name or status_code == 429:
-        return RateLimitError("Gemini rate limit exceeded", provider="gemini", retryable=True)
+        return RateLimitError("Rate limit exceeded", provider="gemini", retryable=True, status_code=status_code or 429)
     if "unauthenticated" in class_name or "permissiondenied" in class_name or status_code in {401, 403}:
-        return AuthenticationError("Gemini authentication failed", provider="gemini")
+        return AuthenticationError("Gemini authentication failed", provider="gemini", status_code=status_code)
     if "notfound" in class_name or status_code == 404:
-        return ModelNotFoundError("Gemini model not found", provider="gemini")
+        return ModelNotFoundError("Gemini model not found", provider="gemini", status_code=status_code)
     if "serviceunavailable" in class_name or "deadlineexceeded" in class_name or status_code in {500, 502, 503, 504}:
-        return ProviderUnavailableError("Gemini provider unavailable", provider="gemini", retryable=True)
+        return ProviderUnavailableError("Gemini provider unavailable", provider="gemini", retryable=True, status_code=status_code)
     if ("invalidargument" in class_name or status_code == 400) and ("context" in lowered or "token" in lowered):
-        return ContextLengthError("Gemini context length exceeded", provider="gemini")
-    return LLMError("Gemini request failed", provider="gemini")
+        return ContextLengthError("Gemini context length exceeded", provider="gemini", status_code=status_code)
+    return LLMError("Gemini request failed", provider="gemini", status_code=status_code)
 
 
 def _status_code(exc: Exception) -> int | None:

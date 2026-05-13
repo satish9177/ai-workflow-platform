@@ -35,3 +35,34 @@ class RunRead(BaseModel):
 
 class RunDetail(RunRead):
     step_results: list[StepResultRead]
+
+
+class StepExecutionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    step_index: int
+    step_key: str
+    step_type: str
+    step_label: str | None
+    status: str
+    attempt_number: int
+    max_attempts: int
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_ms: int | None
+    error_details: dict[str, Any] | None
+    input_preview: dict[str, Any] | None
+    output_preview: dict[str, Any] | None
+    provider: str | None
+    model: str | None
+    tool_name: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RunTimelineRead(BaseModel):
+    run: RunRead
+    steps: list[StepExecutionRead]
+    failed_step_key: str | None = None

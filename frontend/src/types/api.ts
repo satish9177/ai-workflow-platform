@@ -1,5 +1,6 @@
 export type Workflow = {
   id: string;
+  webhook_id: string;
   name: string;
   description?: string | null;
   steps: Record<string, unknown>[];
@@ -39,6 +40,35 @@ export type Run = {
 
 export type RunDetail = Run & {
   step_results: StepResult[];
+};
+
+export type StepExecution = {
+  id: string;
+  run_id: string;
+  step_index: number;
+  step_key: string;
+  step_type: string;
+  step_label?: string | null;
+  status: string;
+  attempt_number: number;
+  max_attempts: number;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+  error_details?: Record<string, unknown> | null;
+  input_preview?: Record<string, unknown> | null;
+  output_preview?: Record<string, unknown> | null;
+  provider?: string | null;
+  model?: string | null;
+  tool_name?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RunTimeline = {
+  run: Run;
+  steps: StepExecution[];
+  failed_step_key?: string | null;
 };
 
 export type Approval = {

@@ -153,6 +153,7 @@ app.include_router(runs_router, prefix="/api/v1/runs")
 app.include_router(approvals_router, prefix="/api/v1/approvals")
 app.include_router(integrations_router, prefix="/api/v1/integrations")
 app.include_router(llm_router, prefix="/api/v1/llm", tags=["llm"])
+app.include_router(webhooks_router, prefix="/api/v1/webhooks")
 app.include_router(webhooks_router, prefix="/webhooks")
 
 

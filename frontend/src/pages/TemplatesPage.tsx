@@ -8,9 +8,9 @@ export default function TemplatesPage() {
   const navigate = useNavigate();
   const { data, error, isLoading } = useQuery({
     queryKey: ["integrations"],
-    queryFn: fetchIntegrations,
+    queryFn: () => fetchIntegrations(),
   });
-  const configured = new Set(data?.filter((item) => item.has_credentials).map((item) => item.name) || []);
+  const configured = new Set(data?.filter((item) => item.credentials_set).map((item) => item.integration_type) || []);
 
   return (
     <section className="space-y-4">

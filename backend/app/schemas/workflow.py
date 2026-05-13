@@ -1,11 +1,30 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ALLOWED_STEP_TYPES = {"llm", "tool", "approval", "condition"}
 ALLOWED_LLM_PROVIDERS = {"openai", "anthropic", "gemini", "mock"}
+
+
+def apply_trigger_alias(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    trigger = data.get("trigger")
+    if not isinstance(trigger, dict):
+        return data
+
+    normalized = dict(data)
+    trigger_type = trigger.get("type")
+    if trigger_type:
+        normalized["trigger_type"] = trigger_type
+    if trigger_type == "webhook":
+        trigger_config = dict(normalized.get("trigger_config") or {})
+        if trigger.get("secret"):
+            trigger_config["secret"] = trigger["secret"]
+        normalized["trigger_config"] = trigger_config
+    return normalized
 
 
 def validate_workflow_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -57,6 +76,11 @@ class WorkflowCreate(BaseModel):
     trigger_type: Literal["manual", "cron", "webhook"]
     trigger_config: dict[str, Any] = {}
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_trigger(cls, data: Any) -> Any:
+        return apply_trigger_alias(data)
+
     @field_validator("steps")
     @classmethod
     def validate_steps(cls, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -70,6 +94,11 @@ class WorkflowUpdate(BaseModel):
     trigger_type: Literal["manual", "cron", "webhook"] | None = None
     trigger_config: dict[str, Any] | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_trigger(cls, data: Any) -> Any:
+        return apply_trigger_alias(data)
+
     @field_validator("steps")
     @classmethod
     def validate_steps(cls, steps: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -82,6 +111,7 @@ class WorkflowRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    webhook_id: str
     name: str
     description: str | None
     steps: list[dict[str, Any]]
