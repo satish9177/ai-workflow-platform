@@ -91,7 +91,7 @@ async def _poll_cron_triggers() -> None:
 
         for workflow in workflows:
             trigger_config = dict(workflow.trigger_config or {})
-            cron_expression = trigger_config.get("cron")
+            cron_expression = trigger_config.get("cron_expression") or trigger_config.get("cron")
             if not cron_expression:
                 continue
 

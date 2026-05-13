@@ -54,6 +54,74 @@ async def test_cron_poll_creates_run_when_due(monkeypatch):
     assert workflow.trigger_config["last_run"]
 
 
+async def test_cron_poll_creates_run_with_cron_expression_key(monkeypatch):
+    enqueued = []
+
+    async def fake_enqueue(run_id):
+        enqueued.append(run_id)
+
+    monkeypatch.setattr(main, "enqueue_execute_workflow", fake_enqueue)
+    last_run = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    async with TestingSessionLocal() as db:
+        workflow = Workflow(
+            name="Cron expression workflow",
+            steps=[{"id": "fetch", "type": "tool", "tool": "http_request", "action": "execute", "params": {"url": "https://example.test"}}],
+            trigger_type="cron",
+            trigger_config={"cron_expression": "* * * * *", "last_run": last_run.isoformat()},
+            is_active=True,
+        )
+        db.add(workflow)
+        await db.commit()
+        await db.refresh(workflow)
+        workflow_id = workflow.id
+
+    await main._poll_cron_triggers()
+
+    async with TestingSessionLocal() as db:
+        runs = (
+            await db.execute(select(Run).where(Run.workflow_id == workflow_id))
+        ).scalars().all()
+
+    assert len(runs) == 1
+    assert runs[0].trigger_data == {"source": "cron"}
+    assert enqueued == [runs[0].id]
+
+
+async def test_cron_poll_still_supports_legacy_cron_key(monkeypatch):
+    enqueued = []
+
+    async def fake_enqueue(run_id):
+        enqueued.append(run_id)
+
+    monkeypatch.setattr(main, "enqueue_execute_workflow", fake_enqueue)
+    last_run = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    async with TestingSessionLocal() as db:
+        workflow = Workflow(
+            name="Legacy cron workflow",
+            steps=[{"id": "fetch", "type": "tool", "tool": "http_request", "action": "execute", "params": {"url": "https://example.test"}}],
+            trigger_type="cron",
+            trigger_config={"cron": "* * * * *", "last_run": last_run.isoformat()},
+            is_active=True,
+        )
+        db.add(workflow)
+        await db.commit()
+        await db.refresh(workflow)
+        workflow_id = workflow.id
+
+    await main._poll_cron_triggers()
+
+    async with TestingSessionLocal() as db:
+        runs = (
+            await db.execute(select(Run).where(Run.workflow_id == workflow_id))
+        ).scalars().all()
+
+    assert len(runs) == 1
+    assert runs[0].trigger_data == {"source": "cron"}
+    assert enqueued == [runs[0].id]
+
+
 async def test_invalid_cron_does_not_crash_poller(monkeypatch):
     async def fake_enqueue(run_id):
         raise AssertionError("invalid cron should not enqueue")
