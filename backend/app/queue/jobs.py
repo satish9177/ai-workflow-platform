@@ -1,5 +1,5 @@
 from app.database import AsyncSessionLocal
-from app.engine.executor import execute_parallel_branch, execute_run, resume_run
+from app.engine.executor import execute_foreach_iteration, execute_parallel_branch, execute_run, resume_run
 import structlog
 
 
@@ -59,5 +59,40 @@ async def execute_parallel_branch_job(
             run_id=run_id,
             group_step_key=group_step_key,
             branch_index=branch_index,
+        )
+        raise
+
+
+async def execute_foreach_iteration_job(
+    ctx,
+    branch_execution_id: str,
+    run_id: str,
+    foreach_step_key: str,
+    item_index: int,
+) -> None:
+    logger.info(
+        "arq.execute_foreach_iteration.started",
+        branch_execution_id=branch_execution_id,
+        run_id=run_id,
+        foreach_step_key=foreach_step_key,
+        item_index=item_index,
+    )
+    try:
+        async with AsyncSessionLocal() as db:
+            await execute_foreach_iteration(branch_execution_id, run_id, foreach_step_key, item_index, db)
+        logger.info(
+            "arq.execute_foreach_iteration.succeeded",
+            branch_execution_id=branch_execution_id,
+            run_id=run_id,
+            foreach_step_key=foreach_step_key,
+            item_index=item_index,
+        )
+    except Exception:
+        logger.exception(
+            "arq.execute_foreach_iteration.failed",
+            branch_execution_id=branch_execution_id,
+            run_id=run_id,
+            foreach_step_key=foreach_step_key,
+            item_index=item_index,
         )
         raise

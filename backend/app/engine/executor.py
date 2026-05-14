@@ -1,5 +1,7 @@
 import asyncio
 import inspect
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +29,8 @@ from app.utils.template_renderer import render_template_object
 
 logger = structlog.get_logger(__name__)
 TERMINAL_BRANCH_STATUSES = {"completed", "failed", "cancelled"}
+ACTIVE_FOREACH_STATUSES = {"queued", "running"}
+DEFAULT_FOREACH_CONCURRENCY_LIMIT = 10
 
 
 async def _get_existing_step(db: AsyncSession, run_id: str, step_id: str) -> StepResult | None:
@@ -122,6 +126,8 @@ async def _start_step_execution(
     input_preview: dict[str, Any] | None = None,
     branch_execution_id: str | None = None,
     branch_key: str | None = None,
+    foreach_index: int | None = None,
+    foreach_item: Any | None = None,
 ) -> StepExecution:
     now = datetime.now(timezone.utc)
     step_execution = await _get_existing_step_execution(db, run_id, step_id)
@@ -134,6 +140,8 @@ async def _start_step_execution(
             step_label=_step_label(step, step_id),
             branch_execution_id=branch_execution_id,
             branch_key=branch_key,
+            foreach_index=foreach_index,
+            foreach_item=foreach_item,
             status="running",
             attempt_number=1,
             max_attempts=_max_attempts_for_step(step, step_type),
@@ -150,6 +158,8 @@ async def _start_step_execution(
         step_execution.step_label = _step_label(step, step_id)
         step_execution.branch_execution_id = branch_execution_id
         step_execution.branch_key = branch_key
+        step_execution.foreach_index = foreach_index
+        step_execution.foreach_item = foreach_item
         step_execution.status = "running"
         step_execution.attempt_number = 1
         step_execution.max_attempts = _max_attempts_for_step(step, step_type)
@@ -319,7 +329,7 @@ async def _dispatch_step(
     if step_type == "parallel_group":
         raise ValueError("Nested parallel_group execution is not supported yet")
     if step_type == "foreach":
-        raise ValueError("foreach execution is not supported yet")
+        raise ValueError("Nested foreach execution is not supported")
     if step_type == "tool" or ToolRegistry.get(step_type) is not None:
         return await run_tool_step(step, context, db, run_id=run_id)
     raise ValueError(f"Unsupported step type: {step_type}")
@@ -375,6 +385,23 @@ async def _enqueue_parallel_branch(
     pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
     try:
         await pool.enqueue_job("execute_parallel_branch_job", branch_execution_id, run_id, group_step_key, branch_index)
+    finally:
+        close = getattr(pool, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+async def _enqueue_foreach_iteration(
+    branch_execution_id: str,
+    run_id: str,
+    foreach_step_key: str,
+    item_index: int,
+) -> None:
+    pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    try:
+        await pool.enqueue_job("execute_foreach_iteration_job", branch_execution_id, run_id, foreach_step_key, item_index)
     finally:
         close = getattr(pool, "close", None)
         if close is not None:
@@ -444,6 +471,238 @@ class ParallelGroupExecutor:
         )
         for branch_index, _child_step in enumerate(child_steps):
             await _enqueue_parallel_branch(branch_execution.id, run.id, group_key, branch_index)
+
+        return branch_execution
+
+
+def _lookup_context_path(context: dict[str, Any], path: str) -> Any:
+    current: Any = context
+    for part in path.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit():
+            current = current[int(part)]
+        else:
+            return None
+    return current
+
+
+def _resolve_foreach_items_expression(items: Any, context: dict[str, Any]) -> list[Any]:
+    if isinstance(items, list):
+        rendered = render_template_object(items, context)
+        if not isinstance(rendered, list):
+            raise ValueError("foreach items must resolve to a list")
+        return rendered
+
+    if isinstance(items, str):
+        expression = items.strip()
+        exact_variable = re.fullmatch(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\s*\}\}", expression)
+        if exact_variable:
+            resolved = _lookup_context_path(context, exact_variable.group(1))
+            if not isinstance(resolved, list):
+                raise ValueError("foreach items must resolve to a list")
+            return resolved
+
+        rendered = render_template_object(items, context)
+        try:
+            decoded = json.loads(rendered)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("foreach items must resolve to a list") from exc
+        if not isinstance(decoded, list):
+            raise ValueError("foreach items must resolve to a list")
+        return decoded
+
+    raise ValueError("foreach items must resolve to a list")
+
+
+def _foreach_concurrency_limit(step: dict[str, Any], total_items: int) -> int:
+    try:
+        configured = int(step.get("concurrency_limit") or DEFAULT_FOREACH_CONCURRENCY_LIMIT)
+    except (TypeError, ValueError):
+        configured = DEFAULT_FOREACH_CONCURRENCY_LIMIT
+    return max(1, min(configured, max(total_items, 1)))
+
+
+async def _reserve_foreach_iteration(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    branch_execution_id: str,
+    foreach_step: dict[str, Any],
+    foreach_step_index: int,
+    item_index: int,
+    item: Any,
+) -> StepExecution:
+    child_step = foreach_step.get("step") or {}
+    branch_key, iteration_step = _foreach_iteration_step(str(foreach_step["id"]), child_step, item_index)
+    existing = await _get_existing_step_execution(db, run_id, str(iteration_step["id"]))
+    if existing is not None:
+        if existing.status not in TERMINAL_BRANCH_STATUSES and existing.status not in ACTIVE_FOREACH_STATUSES:
+            existing.status = "pending"
+            existing.branch_execution_id = branch_execution_id
+            existing.branch_key = branch_key
+            existing.foreach_index = item_index
+            existing.foreach_item = item
+            existing.completed_at = None
+            existing.duration_ms = None
+            existing.error_details = None
+        await db.flush()
+        return existing
+
+    step_execution = StepExecution(
+        run_id=run_id,
+        branch_execution_id=branch_execution_id,
+        step_index=(foreach_step_index + 1) * 1000 + item_index,
+        step_key=str(iteration_step["id"]),
+        step_type=str(iteration_step.get("type") or ""),
+        step_label=_step_label(iteration_step, str(iteration_step["id"])),
+        status="pending",
+        attempt_number=1,
+        max_attempts=_max_attempts_for_step(iteration_step, str(iteration_step.get("type") or "")),
+        branch_key=branch_key,
+        foreach_index=item_index,
+        foreach_item=item,
+    )
+    db.add(step_execution)
+    await db.flush()
+    return step_execution
+
+
+async def _queue_foreach_iteration(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    branch_execution: BranchExecution,
+    foreach_step: dict[str, Any],
+    foreach_step_index: int,
+    item_index: int,
+    item: Any,
+) -> bool:
+    child_step = foreach_step.get("step") or {}
+    _branch_key, iteration_step = _foreach_iteration_step(str(foreach_step["id"]), child_step, item_index)
+    step_id, step_type = _validate_step_for_execution(iteration_step)
+    step_execution = await _reserve_foreach_iteration(
+        db,
+        run_id=run_id,
+        branch_execution_id=branch_execution.id,
+        foreach_step=foreach_step,
+        foreach_step_index=foreach_step_index,
+        item_index=item_index,
+        item=item,
+    )
+    if step_execution.status not in TERMINAL_BRANCH_STATUSES:
+        step_execution.status = "queued"
+        step_execution.completed_at = None
+        step_execution.duration_ms = None
+        step_execution.error_details = None
+    await db.commit()
+
+    try:
+        await _enqueue_foreach_iteration(branch_execution.id, run_id, branch_execution.step_key, item_index)
+    except Exception as exc:
+        failed_execution = await _get_existing_step_execution(db, run_id, step_id) or step_execution
+        await _finish_step_execution(db, failed_execution, "failed", error=exc)
+        await _upsert_step(
+            db,
+            run_id,
+            step_id,
+            step_type,
+            "failed",
+            input=iteration_step,
+            error=f"Failed to enqueue foreach iteration: {exc}",
+        )
+        await _sync_foreach_branch_counters(db, branch_execution.id)
+        await db.commit()
+        logger.exception(
+            "foreach.iteration_enqueue_failed",
+            foreach_id=branch_execution.id,
+            step_key=branch_execution.step_key,
+            iteration_step_key=step_id,
+            item_index=item_index,
+            next_iteration_dispatched=False,
+            error=str(exc),
+        )
+        return False
+    return True
+
+
+class ForeachExecutor:
+    async def start(
+        self,
+        *,
+        run: Run,
+        workflow: Workflow,
+        step: dict[str, Any],
+        step_index: int,
+        context: dict[str, Any],
+        db: AsyncSession,
+    ) -> BranchExecution:
+        foreach_key = str(step["id"])
+        existing = await _get_branch_execution(db, run.id, foreach_key)
+        if existing is not None:
+            logger.info(
+                "foreach.already_started",
+                run_id=run.id,
+                workflow_id=workflow.id,
+                step_key=foreach_key,
+                branch_execution_id=existing.id,
+                status=existing.status,
+            )
+            return existing
+
+        items = _resolve_foreach_items_expression(step.get("items"), context)
+        branch_execution = BranchExecution(
+            run_id=run.id,
+            step_key=foreach_key,
+            branch_type="foreach",
+            status="running",
+            total_branches=len(items),
+            completed_branches=0,
+            failed_branches=0,
+            cancelled_branches=0,
+            merge_triggered=False,
+            fail_fast=bool(step.get("fail_fast", False)),
+            fail_fast_triggered=False,
+            foreach_items=items,
+            merged_context=None,
+            started_at=datetime.now(timezone.utc),
+        )
+        db.add(branch_execution)
+        run.context = context
+        run.status = "running"
+        run.current_step = foreach_key
+        await db.commit()
+        await db.refresh(branch_execution)
+
+        if not items:
+            await _merge_foreach_if_ready(db, branch_execution.id, run.id, foreach_key)
+            return branch_execution
+
+        limit = _foreach_concurrency_limit(step, len(items))
+        logger.info(
+            "foreach.started",
+            run_id=run.id,
+            workflow_id=workflow.id,
+            step_key=foreach_key,
+            branch_execution_id=branch_execution.id,
+            total_items=len(items),
+            concurrency_limit=limit,
+        )
+        dispatch_results = []
+        for item_index in range(limit):
+            dispatched = await _queue_foreach_iteration(
+                db,
+                run_id=run.id,
+                branch_execution=branch_execution,
+                foreach_step=step,
+                foreach_step_index=step_index,
+                item_index=item_index,
+                item=items[item_index],
+            )
+            dispatch_results.append(dispatched)
+
+        if not all(dispatch_results):
+            await _merge_foreach_if_ready(db, branch_execution.id, run.id, foreach_key)
 
         return branch_execution
 
@@ -628,6 +887,648 @@ async def _merge_parallel_group_if_ready(
         branch_execution_id=branch_execution_id,
     )
     await execute_run(run_id, db)
+
+
+def _find_foreach_step(workflow: Workflow, foreach_step_key: str) -> tuple[int, dict[str, Any]]:
+    for index, step in enumerate(workflow.steps):
+        if step.get("id") == foreach_step_key and step.get("type") == "foreach":
+            return index, step
+    raise ValueError(f"Foreach step not found: {foreach_step_key}")
+
+
+def _foreach_iteration_step(foreach_step_key: str, step: dict[str, Any], item_index: int) -> tuple[str, dict[str, Any]]:
+    child_id = step.get("id")
+    if not child_id:
+        raise ValueError("Invalid foreach iteration step: missing id")
+    branch_key = str(item_index)
+    dotted_key = f"{foreach_step_key}.{item_index}.{child_id}"
+    return branch_key, {**step, "id": dotted_key}
+
+
+async def _foreach_started_indices(db: AsyncSession, branch_execution_id: str) -> set[int]:
+    result = await db.execute(
+        select(StepExecution.foreach_index).where(
+            StepExecution.branch_execution_id == branch_execution_id,
+            StepExecution.foreach_index.is_not(None),
+            StepExecution.status.in_(TERMINAL_BRANCH_STATUSES | ACTIVE_FOREACH_STATUSES),
+        )
+    )
+    return {int(index) for index in result.scalars().all() if index is not None}
+
+
+async def _foreach_running_count(db: AsyncSession, branch_execution_id: str) -> int:
+    result = await db.execute(
+        select(StepExecution.status).where(
+            StepExecution.branch_execution_id == branch_execution_id,
+            StepExecution.foreach_index.is_not(None),
+        )
+    )
+    return sum(1 for status in result.scalars().all() if status in ACTIVE_FOREACH_STATUSES)
+
+
+async def _sync_foreach_branch_counters(db: AsyncSession, branch_execution_id: str) -> BranchExecution | None:
+    """Rebuild foreach fan-in counters from persisted iteration state.
+
+    Foreach iteration jobs are retried independently. If a worker completes the
+    external side effect and persists StepResult but is retried before branch
+    accounting runs, we need fan-in to be idempotent instead of increment-only.
+    """
+    await db.flush()
+    branch_execution = await db.get(BranchExecution, branch_execution_id)
+    if branch_execution is None or branch_execution.merge_triggered:
+        return branch_execution
+
+    result = await db.execute(
+        select(StepExecution.foreach_index, StepExecution.status).where(
+            StepExecution.branch_execution_id == branch_execution_id,
+            StepExecution.foreach_index.is_not(None),
+        )
+    )
+    rows = result.all()
+    statuses = [status for _index, status in rows]
+    branch_execution.completed_branches = sum(1 for status in statuses if status == "completed")
+    branch_execution.failed_branches = sum(1 for status in statuses if status == "failed")
+    branch_execution.cancelled_branches = max(
+        branch_execution.cancelled_branches,
+        sum(1 for status in statuses if status == "cancelled"),
+    )
+    await db.flush()
+    currently_running_count = sum(1 for status in statuses if status in ACTIVE_FOREACH_STATUSES)
+    merge_ready = _all_branches_terminal(branch_execution)
+    logger.debug(
+        "foreach.terminal_counters_synced",
+        foreach_id=branch_execution.id,
+        step_key=branch_execution.step_key,
+        total_items=branch_execution.total_branches,
+        completed_count=branch_execution.completed_branches,
+        failed_count=branch_execution.failed_branches,
+        cancelled_count=branch_execution.cancelled_branches,
+        currently_running_count=currently_running_count,
+        merge_condition_true=merge_ready,
+    )
+    return branch_execution
+
+
+async def _reconcile_terminal_foreach_iteration(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    branch_execution_id: str,
+    child_step: dict[str, Any],
+    step_id: str,
+    step_type: str,
+    step_index: int,
+    branch_key: str,
+    foreach_index: int,
+    foreach_item: Any,
+    input_preview: dict[str, Any] | None,
+    step_result: StepResult,
+) -> BranchExecution | None:
+    status = step_result.status
+    if status not in TERMINAL_BRANCH_STATUSES:
+        return await _sync_foreach_branch_counters(db, branch_execution_id)
+
+    step_execution = await _get_existing_step_execution(db, run_id, step_id)
+    if step_execution is None:
+        step_execution = await _start_step_execution(
+            db,
+            run_id,
+            step_index,
+            child_step,
+            step_id,
+            step_type,
+            input_preview=input_preview,
+            branch_execution_id=branch_execution_id,
+            branch_key=branch_key,
+            foreach_index=foreach_index,
+            foreach_item=foreach_item,
+        )
+
+    if step_execution.status not in TERMINAL_BRANCH_STATUSES:
+        output_preview = None
+        if status == "completed" and step_result.output is not None:
+            output_preview = _build_output_preview(step_type, step_result.output)
+        await _finish_step_execution(
+            db,
+            step_execution,
+            status,
+            error=step_result.error,
+            output_preview=output_preview,
+        )
+
+    updated = await _sync_foreach_branch_counters(db, branch_execution_id)
+    if updated is not None:
+        currently_running_count = await _foreach_running_count(db, branch_execution_id)
+        logger.debug(
+            "foreach.iteration_terminal_reconciled",
+            foreach_id=branch_execution_id,
+            step_key=updated.step_key,
+            iteration_step_key=step_id,
+            foreach_index=foreach_index,
+            terminal_status=status,
+            total_items=updated.total_branches,
+            completed_count=updated.completed_branches,
+            failed_count=updated.failed_branches,
+            cancelled_count=updated.cancelled_branches,
+            currently_running_count=currently_running_count,
+            merge_condition_true=_all_branches_terminal(updated),
+        )
+    return updated
+
+
+async def _enqueue_next_foreach_iterations(
+    db: AsyncSession,
+    branch_execution: BranchExecution,
+    run_id: str,
+    foreach_step: dict[str, Any],
+    foreach_step_index: int,
+) -> None:
+    total_items = branch_execution.total_branches
+    terminal_count = (
+        branch_execution.completed_branches
+        + branch_execution.failed_branches
+        + branch_execution.cancelled_branches
+    )
+    started = await _foreach_started_indices(db, branch_execution.id)
+    next_iteration_index = next((index for index in range(total_items) if index not in started), None)
+    if branch_execution.fail_fast_triggered:
+        logger.debug(
+            "foreach.next_iteration_dispatch_skipped",
+            foreach_id=branch_execution.id,
+            step_key=branch_execution.step_key,
+            total_items=total_items,
+            completed_count=branch_execution.completed_branches,
+            failed_count=branch_execution.failed_branches,
+            cancelled_count=branch_execution.cancelled_branches,
+            currently_running_count=max(0, len(started) - terminal_count),
+            next_iteration_index=next_iteration_index,
+            next_iteration_dispatched=False,
+            reason="fail_fast_triggered",
+        )
+        await db.commit()
+        return
+    if total_items <= 0:
+        logger.debug(
+            "foreach.next_iteration_dispatch_skipped",
+            foreach_id=branch_execution.id,
+            step_key=branch_execution.step_key,
+            total_items=total_items,
+            completed_count=branch_execution.completed_branches,
+            failed_count=branch_execution.failed_branches,
+            cancelled_count=branch_execution.cancelled_branches,
+            currently_running_count=0,
+            next_iteration_index=None,
+            next_iteration_dispatched=False,
+            reason="empty_items",
+        )
+        await db.commit()
+        return
+
+    running_count = max(0, len(started) - terminal_count)
+    limit = _foreach_concurrency_limit(foreach_step, total_items)
+    available_slots = max(0, limit - running_count)
+    if available_slots == 0:
+        logger.debug(
+            "foreach.next_iteration_dispatch_skipped",
+            foreach_id=branch_execution.id,
+            step_key=branch_execution.step_key,
+            total_items=total_items,
+            completed_count=branch_execution.completed_branches,
+            failed_count=branch_execution.failed_branches,
+            cancelled_count=branch_execution.cancelled_branches,
+            currently_running_count=running_count,
+            next_iteration_index=next_iteration_index,
+            next_iteration_dispatched=False,
+            concurrency_limit=limit,
+            reason="concurrency_limit_reached",
+        )
+        await db.commit()
+        return
+
+    next_indices = [index for index in range(total_items) if index not in started][:available_slots]
+    items = branch_execution.foreach_items or []
+    dispatched_indices = []
+    for item_index in next_indices:
+        dispatched = await _queue_foreach_iteration(
+            db,
+            run_id=run_id,
+            branch_execution=branch_execution,
+            foreach_step=foreach_step,
+            foreach_step_index=foreach_step_index,
+            item_index=item_index,
+            item=items[item_index],
+        )
+        if dispatched:
+            dispatched_indices.append(item_index)
+    updated_branch = await db.get(BranchExecution, branch_execution.id)
+    if updated_branch is not None:
+        branch_execution = updated_branch
+    logger.debug(
+        "foreach.next_iteration_dispatched",
+        foreach_id=branch_execution.id,
+        step_key=branch_execution.step_key,
+        total_items=total_items,
+        completed_count=branch_execution.completed_branches,
+        failed_count=branch_execution.failed_branches,
+        cancelled_count=branch_execution.cancelled_branches,
+        currently_running_count=running_count,
+        next_iteration_index=dispatched_indices[0] if dispatched_indices else next_iteration_index,
+        dispatched_indices=dispatched_indices,
+        next_iteration_dispatched=bool(dispatched_indices),
+        concurrency_limit=limit,
+    )
+    if len(dispatched_indices) != len(next_indices):
+        await _merge_foreach_if_ready(db, branch_execution.id, run_id, branch_execution.step_key)
+        return
+    await db.commit()
+
+
+async def _cancel_remaining_foreach_iterations(db: AsyncSession, branch_execution_id: str) -> BranchExecution | None:
+    result = await db.execute(
+        update(BranchExecution)
+        .where(BranchExecution.id == branch_execution_id, BranchExecution.merge_triggered.is_(False))
+        .values(
+            cancelled_branches=(
+                BranchExecution.total_branches
+                - BranchExecution.completed_branches
+                - BranchExecution.failed_branches
+            ),
+            fail_fast_triggered=True,
+        )
+        .returning(BranchExecution)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _synthesize_foreach_output(
+    db: AsyncSession,
+    run_id: str,
+    foreach_step: dict[str, Any],
+    branch_execution: BranchExecution,
+) -> dict[str, Any]:
+    results: list[Any] = []
+    child_step = foreach_step.get("step") or {}
+    child_id = str(child_step.get("id", "step"))
+    for item_index in range(branch_execution.total_branches):
+        dotted_key = f"{foreach_step['id']}.{item_index}.{child_id}"
+        step_result = await _get_existing_step(db, run_id, dotted_key)
+        if step_result is None:
+            results.append({"status": "cancelled" if branch_execution.fail_fast_triggered else "missing"})
+        elif step_result.status == "completed":
+            results.append(step_result.output)
+        else:
+            results.append({"status": step_result.status, "error": step_result.error})
+    return {
+        "results": results,
+        "completed_count": branch_execution.completed_branches,
+        "failed_count": branch_execution.failed_branches,
+    }
+
+
+async def _merge_foreach_if_ready(
+    db: AsyncSession,
+    branch_execution_id: str,
+    run_id: str,
+    foreach_step_key: str,
+) -> None:
+    branch_execution = await db.get(BranchExecution, branch_execution_id)
+    if branch_execution is None:
+        logger.warning(
+            "foreach.merge_evaluation_missing_branch",
+            foreach_id=branch_execution_id,
+            step_key=foreach_step_key,
+            merge_condition_true=False,
+            merge_job_dispatched=False,
+        )
+        await db.commit()
+        return
+
+    currently_running_count = await _foreach_running_count(db, branch_execution_id)
+    merge_ready = _all_branches_terminal(branch_execution)
+    logger.debug(
+        "foreach.merge_evaluated",
+        foreach_id=branch_execution.id,
+        step_key=branch_execution.step_key,
+        total_items=branch_execution.total_branches,
+        completed_count=branch_execution.completed_branches,
+        failed_count=branch_execution.failed_branches,
+        cancelled_count=branch_execution.cancelled_branches,
+        currently_running_count=currently_running_count,
+        merge_condition_true=merge_ready,
+        merge_job_dispatched=merge_ready,
+    )
+    if not merge_ready:
+        await db.commit()
+        return
+
+    claimed = await _claim_merge(db, branch_execution_id)
+    if claimed is None:
+        logger.debug(
+            "foreach.merge_claim_skipped",
+            foreach_id=branch_execution.id,
+            step_key=branch_execution.step_key,
+            total_items=branch_execution.total_branches,
+            completed_count=branch_execution.completed_branches,
+            failed_count=branch_execution.failed_branches,
+            cancelled_count=branch_execution.cancelled_branches,
+            currently_running_count=currently_running_count,
+            merge_condition_true=True,
+            merge_job_dispatched=False,
+            reason="already_claimed",
+        )
+        await db.commit()
+        return
+
+    run = await db.get(Run, run_id)
+    if run is None:
+        await db.commit()
+        return
+    workflow = await db.get(Workflow, run.workflow_id)
+    if workflow is None:
+        run.status = "failed"
+        run.error = "Workflow not found"
+        await db.commit()
+        return
+
+    _foreach_step_index, foreach_step = _find_foreach_step(workflow, foreach_step_key)
+    branch_execution = await db.get(BranchExecution, branch_execution_id)
+    if branch_execution is None:
+        await db.commit()
+        return
+    merged_output = await _synthesize_foreach_output(db, run_id, foreach_step, branch_execution)
+    now = datetime.now(timezone.utc)
+    branch_execution.completed_at = now
+    branch_execution.merged_context = merged_output
+
+    foreach_step_execution = await _get_existing_step_execution(db, run_id, foreach_step_key)
+    if branch_execution.failed_branches or branch_execution.cancelled_branches:
+        branch_execution.status = "failed"
+        await _upsert_step(
+            db,
+            run_id,
+            foreach_step_key,
+            "foreach",
+            "failed",
+            input=foreach_step,
+            output=merged_output,
+            error="One or more foreach iterations failed",
+        )
+        if foreach_step_execution is not None:
+            await _finish_step_execution(
+                db,
+                foreach_step_execution,
+                "failed",
+                error="One or more foreach iterations failed",
+                output_preview=sanitize_preview_payload(merged_output),
+            )
+        run.status = "failed"
+        run.error = "One or more foreach iterations failed"
+        run.context = {**(run.context or {}), foreach_step_key: merged_output}
+        await db.commit()
+        logger.warning(
+            "foreach.failed",
+            run_id=run_id,
+            workflow_id=workflow.id,
+            step_key=foreach_step_key,
+            branch_execution_id=branch_execution_id,
+        )
+        return
+
+    branch_execution.status = "completed"
+    context = dict(run.context or {})
+    context[foreach_step_key] = merged_output
+    if foreach_step.get("output_as"):
+        context[str(foreach_step["output_as"])] = merged_output
+    run.context = context
+    await _upsert_step(
+        db,
+        run_id,
+        foreach_step_key,
+        "foreach",
+        "completed",
+        input=foreach_step,
+        output=merged_output,
+    )
+    if foreach_step_execution is not None:
+        await _finish_step_execution(
+            db,
+            foreach_step_execution,
+            "completed",
+            output_preview=sanitize_preview_payload(merged_output),
+        )
+    await db.commit()
+    logger.info(
+        "foreach.completed",
+        run_id=run_id,
+        workflow_id=workflow.id,
+        step_key=foreach_step_key,
+        branch_execution_id=branch_execution_id,
+    )
+    await execute_run(run_id, db)
+
+
+async def execute_foreach_iteration(
+    branch_execution_id: str,
+    run_id: str,
+    foreach_step_key: str,
+    item_index: int,
+    db: AsyncSession,
+) -> None:
+    run = await db.get(Run, run_id)
+    if run is None:
+        logger.warning("foreach_iteration.run_not_found", run_id=run_id, branch_execution_id=branch_execution_id)
+        return
+    workflow = await db.get(Workflow, run.workflow_id)
+    if workflow is None:
+        logger.warning("foreach_iteration.workflow_not_found", run_id=run_id, workflow_id=run.workflow_id)
+        return
+
+    foreach_step_index, foreach_step = _find_foreach_step(workflow, foreach_step_key)
+    branch_execution = await db.get(BranchExecution, branch_execution_id)
+    if branch_execution is None:
+        logger.warning("foreach_iteration.branch_execution_not_found", branch_execution_id=branch_execution_id)
+        return
+    if branch_execution.fail_fast_triggered:
+        await _merge_foreach_if_ready(db, branch_execution_id, run_id, foreach_step_key)
+        return
+    items = branch_execution.foreach_items or []
+    if item_index >= len(items):
+        raise ValueError(f"Foreach item index out of range: {item_index}")
+
+    branch_key, child_step = _foreach_iteration_step(foreach_step_key, foreach_step.get("step") or {}, item_index)
+    step_id, step_type = _validate_step_for_execution(child_step)
+    if step_type in {"parallel_group", "foreach"}:
+        raise ValueError(f"Nested orchestration step is not supported in foreach: {step_type}")
+
+    item = items[item_index]
+    context: dict[str, Any] = dict(run.context or {})
+    if run.trigger_data:
+        context.setdefault("trigger_data", run.trigger_data)
+    item_variable = str(foreach_step.get("item_variable") or "item")
+    index_variable = str(foreach_step.get("index_variable") or "index")
+    context[item_variable] = item
+    context[index_variable] = item_index
+    context["foreach"] = {"item": item, "index": item_index}
+
+    step_index = (foreach_step_index + 1) * 1000 + item_index
+    input_preview = _build_input_preview(child_step, context, step_type)
+    existing = await _get_existing_step(db, run_id, step_id)
+    if existing is not None and existing.status in TERMINAL_BRANCH_STATUSES:
+        updated = await _reconcile_terminal_foreach_iteration(
+            db,
+            run_id=run_id,
+            branch_execution_id=branch_execution_id,
+            child_step=child_step,
+            step_id=step_id,
+            step_type=step_type,
+            step_index=step_index,
+            branch_key=branch_key,
+            foreach_index=item_index,
+            foreach_item=item,
+            input_preview=input_preview,
+            step_result=existing,
+        )
+        if updated is None:
+            await _merge_foreach_if_ready(db, branch_execution_id, run_id, foreach_step_key)
+            return
+        if _all_branches_terminal(updated):
+            await _merge_foreach_if_ready(db, branch_execution_id, run_id, foreach_step_key)
+            return
+        current_index, current_foreach_step = _find_foreach_step(workflow, foreach_step_key)
+        await _enqueue_next_foreach_iterations(db, updated, run_id, current_foreach_step, current_index)
+        return
+
+    step_execution = await _start_step_execution(
+        db,
+        run_id,
+        step_index,
+        child_step,
+        step_id,
+        step_type,
+        input_preview=input_preview,
+        branch_execution_id=branch_execution_id,
+        branch_key=branch_key,
+        foreach_index=item_index,
+        foreach_item=item,
+    )
+    await _upsert_step(db, run_id, step_id, step_type, "running", input=child_step)
+    await db.commit()
+
+    iteration_status = "completed"
+    try:
+        attempt_number = 1
+        if step_type in {"tool", "llm"}:
+            output, attempt_number = await _execute_step_with_retry(child_step, context, run_id, db)
+        else:
+            output = await _dispatch_step(child_step, context, run_id, db)
+
+        normalized_output = output if isinstance(output, dict) else {"result": output}
+        await _upsert_step(
+            db,
+            run_id,
+            step_id,
+            step_type,
+            "completed",
+            input=child_step,
+            output=normalized_output,
+        )
+        await _finish_step_execution(
+            db,
+            step_execution,
+            "completed",
+            attempt_number=attempt_number,
+            output_preview=_build_output_preview(step_type, normalized_output),
+        )
+        logger.info(
+            "foreach_iteration.completed",
+            run_id=run_id,
+            workflow_id=workflow.id,
+            foreach_step_key=foreach_step_key,
+            item_index=item_index,
+            step_key=step_id,
+        )
+    except Exception as exc:
+        iteration_status = "failed"
+        await _finish_step_execution(
+            db,
+            step_execution,
+            "failed",
+            attempt_number=getattr(exc, "attempt_number", _max_attempts_for_step(child_step, step_type)),
+            error=exc,
+        )
+        await _upsert_step(
+            db,
+            run_id,
+            step_id,
+            step_type,
+            "failed",
+            input=child_step,
+            error=_step_error_message(exc),
+        )
+        logger.exception(
+            "foreach_iteration.failed",
+            run_id=run_id,
+            workflow_id=workflow.id,
+            foreach_step_key=foreach_step_key,
+            item_index=item_index,
+            step_key=step_id,
+            error=str(exc),
+        )
+
+    updated = await _sync_foreach_branch_counters(db, branch_execution_id)
+    if updated is None:
+        logger.debug(
+            "foreach.iteration_terminal_accounting_missing_branch",
+            foreach_id=branch_execution_id,
+            foreach_step_key=foreach_step_key,
+            item_index=item_index,
+            terminal_status=iteration_status,
+            merge_condition_true=False,
+        )
+        await _merge_foreach_if_ready(db, branch_execution_id, run_id, foreach_step_key)
+        return
+
+    currently_running_count = await _foreach_running_count(db, branch_execution_id)
+    merge_ready = _all_branches_terminal(updated)
+    logger.debug(
+        "foreach.iteration_terminal_accounted",
+        foreach_id=branch_execution_id,
+        step_key=updated.step_key,
+        iteration_step_key=step_id,
+        item_index=item_index,
+        terminal_status=iteration_status,
+        total_items=updated.total_branches,
+        completed_count=updated.completed_branches,
+        failed_count=updated.failed_branches,
+        cancelled_count=updated.cancelled_branches,
+        currently_running_count=currently_running_count,
+        merge_condition_true=merge_ready,
+    )
+
+    if iteration_status == "failed" and updated.fail_fast:
+        updated = await _cancel_remaining_foreach_iterations(db, branch_execution_id)
+        if updated is not None:
+            currently_running_count = await _foreach_running_count(db, branch_execution_id)
+            logger.debug(
+                "foreach.fail_fast_triggered",
+                foreach_id=branch_execution_id,
+                step_key=updated.step_key,
+                total_items=updated.total_branches,
+                completed_count=updated.completed_branches,
+                failed_count=updated.failed_branches,
+                cancelled_count=updated.cancelled_branches,
+                currently_running_count=currently_running_count,
+                merge_condition_true=_all_branches_terminal(updated),
+            )
+            await _merge_foreach_if_ready(db, branch_execution_id, run_id, foreach_step_key)
+        return
+
+    if merge_ready:
+        await _merge_foreach_if_ready(db, branch_execution_id, run_id, foreach_step_key)
+        return
+
+    current_index, current_foreach_step = _find_foreach_step(workflow, foreach_step_key)
+    await _enqueue_next_foreach_iterations(db, updated, run_id, current_foreach_step, current_index)
 
 
 async def execute_parallel_branch(
@@ -816,16 +1717,27 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
                         db=db,
                     )
                     raise ParallelGroupPending()
+                if step_type == "foreach":
+                    await ForeachExecutor().start(
+                        run=run,
+                        workflow=workflow,
+                        step=step,
+                        step_index=step_index,
+                        context=context,
+                        db=db,
+                    )
+                    raise ParallelGroupPending()
                 if step_type in {"tool", "llm"}:
                     output, attempt_number = await _execute_step_with_retry(step, context, run_id, db)
                 else:
                     output = await _dispatch_step(step, context, run_id, db)
             except ParallelGroupPending:
                 logger.info(
-                    "run.waiting_for_parallel_group",
+                    "run.waiting_for_orchestration_step",
                     run_id=run_id,
                     workflow_id=workflow.id,
                     step_id=step_id,
+                    step_type=step_type,
                 )
                 return
             except ApprovalRequiredException:
