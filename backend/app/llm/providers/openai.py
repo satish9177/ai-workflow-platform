@@ -15,7 +15,6 @@ from app.llm.types import LLMRequest, LLMResponse, LLMUsage
 
 class OpenAIProvider(BaseLLMProvider):
     provider_name = "openai"
-    display_name = "OpenAI"
     default_model = "gpt-4o-mini"
 
     def __init__(self, api_key: str):

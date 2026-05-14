@@ -15,7 +15,6 @@ from app.llm.types import LLMRequest, LLMResponse, LLMUsage
 
 class GeminiProvider(BaseLLMProvider):
     provider_name = "gemini"
-    display_name = "Google Gemini"
     default_model = "gemini-1.5-flash"
 
     def __init__(self, api_key: str):
@@ -74,16 +73,16 @@ def _map_gemini_error(exc: Exception) -> LLMError:
     status_code = _status_code(exc)
     class_name = exc.__class__.__name__.lower()
     if "resourceexhausted" in class_name or status_code == 429:
-        return RateLimitError("Rate limit exceeded", provider="gemini", retryable=True, status_code=status_code or 429)
+        return RateLimitError("Gemini rate limit exceeded", provider="gemini", retryable=True)
     if "unauthenticated" in class_name or "permissiondenied" in class_name or status_code in {401, 403}:
-        return AuthenticationError("Gemini authentication failed", provider="gemini", status_code=status_code)
+        return AuthenticationError("Gemini authentication failed", provider="gemini")
     if "notfound" in class_name or status_code == 404:
-        return ModelNotFoundError("Gemini model not found", provider="gemini", status_code=status_code)
+        return ModelNotFoundError("Gemini model not found", provider="gemini")
     if "serviceunavailable" in class_name or "deadlineexceeded" in class_name or status_code in {500, 502, 503, 504}:
-        return ProviderUnavailableError("Gemini provider unavailable", provider="gemini", retryable=True, status_code=status_code)
+        return ProviderUnavailableError("Gemini provider unavailable", provider="gemini", retryable=True)
     if ("invalidargument" in class_name or status_code == 400) and ("context" in lowered or "token" in lowered):
-        return ContextLengthError("Gemini context length exceeded", provider="gemini", status_code=status_code)
-    return LLMError("Gemini request failed", provider="gemini", status_code=status_code)
+        return ContextLengthError("Gemini context length exceeded", provider="gemini")
+    return LLMError("Gemini request failed", provider="gemini")
 
 
 def _status_code(exc: Exception) -> int | None:

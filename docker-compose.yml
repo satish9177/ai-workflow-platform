@@ -12,7 +12,7 @@ services:
 
   worker:
     build: ./backend
-    command: arq app.queue.settings.WorkerSettings
+    command: arq app.queue.WorkerSettings
     env_file: .env
     depends_on:
       - db

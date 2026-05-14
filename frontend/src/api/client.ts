@@ -1,7 +1,5 @@
 import axios, { AxiosError } from "axios";
 
-import type { LlmProvider, LlmProviderModels } from "../types/api";
-
 const baseURL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export const api = axios.create({ baseURL });
@@ -51,12 +49,4 @@ export function getErrorMessage(error: unknown): string {
   }
 
   return "Something went wrong.";
-}
-
-export async function fetchProviders(): Promise<LlmProvider[]> {
-  return (await api.get<LlmProvider[]>("/api/v1/llm/providers")).data;
-}
-
-export async function fetchProviderModels(providerId: string): Promise<LlmProviderModels> {
-  return (await api.get<LlmProviderModels>(`/api/v1/llm/providers/${providerId}/models`)).data;
 }

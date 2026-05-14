@@ -6,7 +6,6 @@ from app.llm.types import LLMRequest, LLMResponse
 class BaseLLMProvider(ABC):
     provider_name: str
     default_model: str
-    display_name: str = ""
 
     @abstractmethod
     async def complete(self, request: LLMRequest) -> LLMResponse:

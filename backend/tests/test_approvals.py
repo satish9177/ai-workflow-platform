@@ -1,14 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
 
 from app.auth import create_approval_token
-from app.engine import executor
-from app.engine.steps import approval as approval_step
 from app.models.approval import Approval
 from app.models.run import Run
-from app.models.step_execution import StepExecution
 from app.models.workflow import Workflow
 from app.routers import approvals as approvals_router
 from app.routers import webhooks as webhooks_router
@@ -34,19 +30,6 @@ async def create_run_with_approval(expires_at=None):
         db.add(run)
         await db.commit()
         await db.refresh(run)
-
-        step_execution = StepExecution(
-            run_id=run.id,
-            step_index=0,
-            step_key="approve",
-            step_type="approval",
-            step_label="approve",
-            status="awaiting_approval",
-            attempt_number=1,
-            max_attempts=1,
-            started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        )
-        db.add(step_execution)
 
         approval = Approval(
             run_id=run.id,
@@ -109,69 +92,9 @@ async def test_reject_via_token(client):
     async with TestingSessionLocal() as db:
         approval = await db.get(Approval, approval_id)
         run = await db.get(Run, run_id)
-        step_execution = (
-            await db.execute(select(StepExecution).where(StepExecution.run_id == run_id))
-        ).scalar_one()
         assert approval.status == "rejected"
         assert run.status == "failed"
         assert run.error == "Rejected by approver"
-        assert step_execution.status == "failed"
-        assert step_execution.completed_at is not None
-        assert step_execution.duration_ms is not None
-        assert step_execution.error_details == {
-            "type": "ApprovalRejected",
-            "message": "Rejected by approver",
-        }
-
-
-async def test_reject_via_token_updates_executor_created_timeline(client, auth_headers, monkeypatch):
-    monkeypatch.setattr(approval_step, "_send_approval_email", lambda approval, step, context: None)
-
-    async with TestingSessionLocal() as db:
-        workflow = Workflow(
-            name="Executor approval workflow",
-            steps=[{"id": "approval_step", "type": "approval", "approver_email": "approver@example.com"}],
-            trigger_type="manual",
-            trigger_config={},
-        )
-        db.add(workflow)
-        await db.commit()
-        await db.refresh(workflow)
-
-        run = Run(workflow_id=workflow.id, status="pending", trigger_data={})
-        db.add(run)
-        await db.commit()
-        await db.refresh(run)
-
-        await executor.execute_run(run.id, db)
-        await db.refresh(run)
-
-        approval = (
-            await db.execute(select(Approval).where(Approval.run_id == run.id))
-        ).scalar_one()
-        approval.step_id = "approve"
-        await db.commit()
-        run_id = run.id
-        token = approval.token
-
-    response = await client.post(f"/api/v1/approvals/{token}/reject")
-
-    assert response.status_code == 200
-
-    timeline = await client.get(f"/api/v1/runs/{run_id}/timeline", headers=auth_headers)
-
-    assert timeline.status_code == 200
-    data = timeline.json()
-    assert data["run"]["status"] == "failed"
-    assert data["failed_step_key"] == "approval_step"
-    assert data["steps"][0]["status"] == "failed"
-    assert data["steps"][0]["step_key"] == "approval_step"
-    assert data["steps"][0]["completed_at"] is not None
-    assert data["steps"][0]["duration_ms"] is not None
-    assert data["steps"][0]["error_details"] == {
-        "type": "ApprovalRejected",
-        "message": "Rejected by approver",
-    }
 
 
 async def test_expired_token(client):

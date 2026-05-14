@@ -5,7 +5,6 @@ description = "FastAPI backend for an AI workflow automation platform"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.115.0",
-    "bcrypt==4.0.1",
     "uvicorn[standard]",
     "sqlalchemy==2.0.36",
     "asyncpg",
@@ -26,7 +25,6 @@ dependencies = [
     "structlog",
     "croniter",
     "email-validator",
-    "aiosmtplib",
 ]
 
 [project.optional-dependencies]

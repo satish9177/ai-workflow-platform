@@ -1,16 +1,7 @@
 class LLMError(Exception):
-    def __init__(
-        self,
-        message: str,
-        provider: str = "unknown",
-        retryable: bool = False,
-        status_code: int | None = None,
-        model: str | None = None,
-    ):
+    def __init__(self, message: str, provider: str = "unknown", retryable: bool = False):
         self.provider = provider
         self.retryable = retryable
-        self.status_code = status_code
-        self.model = model
         super().__init__(message)
 
 

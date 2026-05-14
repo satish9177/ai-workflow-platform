@@ -1,10 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
 
 import { api, getErrorMessage } from "../api/client";
 import type { Workflow } from "../types/api";
 import { formatDate } from "../utils/date";
-import { cronToLabel } from "../utils/schedule";
 
 export default function Workflows() {
   const { data, error, isLoading, refetch } = useQuery({
@@ -45,16 +43,7 @@ export default function Workflows() {
           <tbody>
             {data?.map((workflow) => (
               <tr key={workflow.id}>
-                <td className="table-cell font-medium">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span>{workflow.name}</span>
-                    {workflow.trigger_type === "cron" && (
-                      <span className="badge-blue">
-                        {cronToLabel(String(workflow.trigger_config?.cron_expression || workflow.trigger_config?.cron || ""))}
-                      </span>
-                    )}
-                  </div>
-                </td>
+                <td className="table-cell font-medium">{workflow.name}</td>
                 <td className="table-cell">{workflow.trigger_type}</td>
                 <td className="table-cell">
                   <span className={workflow.is_active ? "badge-green" : "badge-gray"}>
@@ -64,7 +53,6 @@ export default function Workflows() {
                 <td className="table-cell">{formatDate(workflow.created_at)}</td>
                 <td className="table-cell">
                   <div className="flex gap-2">
-                    <Link className="btn-secondary" to={`/workflows/${workflow.id}`}>View details</Link>
                     <button className="btn-secondary" onClick={() => triggerRun(workflow.id)}>Trigger Run</button>
                     <button className="btn-secondary" onClick={() => toggle(workflow.id)}>Toggle</button>
                   </div>

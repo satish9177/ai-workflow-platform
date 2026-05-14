@@ -5,7 +5,6 @@ from jinja2 import TemplateError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.llm.provider_errors import normalize_provider_error
 from app.llm.registry import LLMRegistry
 from app.llm.types import LLMMessage, LLMRequest
 from app.memory import get_history, save_turn
@@ -47,13 +46,7 @@ async def run_llm_step(
         max_tokens=step.get("max_tokens", 1000),
         temperature=step.get("temperature", 0.3),
     )
-    try:
-        response = await LLMRegistry.complete(provider, request)
-    except Exception as exc:
-        provider_error = normalize_provider_error(exc, provider=provider, model=model)
-        if provider_error is not None:
-            raise provider_error from exc
-        raise
+    response = await LLMRegistry.complete(provider, request)
 
     await save_turn(db, session_id, "user", prompt, run_id=run_id)
     await save_turn(db, session_id, "assistant", response.content, run_id=run_id)
