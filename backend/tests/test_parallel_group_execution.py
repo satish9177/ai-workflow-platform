@@ -4,6 +4,8 @@ import pytest
 from sqlalchemy import select
 
 from app.engine import executor
+from app.engine.steps import approval as approval_step
+from app.models.approval import Approval
 from app.models.branch_execution import BranchExecution
 from app.models.run import Run
 from app.models.step_execution import StepExecution
@@ -81,6 +83,45 @@ async def _create_parallel_run() -> str:
         await db.refresh(workflow)
 
         run = Run(workflow_id=workflow.id, status="pending", trigger_data={"source": "test"})
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+        return run.id
+
+
+async def _create_parallel_approval_run() -> str:
+    async with TestingSessionLocal() as db:
+        workflow = Workflow(
+            name="Parallel approval workflow",
+            trigger_type="manual",
+            trigger_config={},
+            steps=[
+                {
+                    "id": "approval_group",
+                    "type": "parallel_group",
+                    "steps": [
+                        {
+                            "id": "approve",
+                            "type": "approval",
+                            "approver_email": "approver@example.com",
+                            "message": "Approve branch",
+                        },
+                        {
+                            "id": "notify",
+                            "type": "tool",
+                            "tool": "http_request",
+                            "action": "execute",
+                            "params": {"url": "https://example.test/notify"},
+                        },
+                    ],
+                }
+            ],
+        )
+        db.add(workflow)
+        await db.commit()
+        await db.refresh(workflow)
+
+        run = Run(workflow_id=workflow.id, status="pending", trigger_data={})
         db.add(run)
         await db.commit()
         await db.refresh(run)
@@ -295,3 +336,109 @@ async def test_linear_workflow_backward_compatibility(monkeypatch):
 
     assert run.status == "completed"
     assert run.context["fetch"]["data"] == {"ok": True}
+
+
+async def test_parallel_group_approval_pauses_branch_and_sibling_completes(fake_parallel_queue, monkeypatch):
+    monkeypatch.setattr(approval_step, "_send_approval_email", lambda approval, step, context: None)
+
+    async def fake_execute(tool_name, action, params, credentials):
+        return ToolResult(success=True, data={"url": params["url"]})
+
+    monkeypatch.setattr(ToolRegistry, "execute", fake_execute)
+    run_id = await _create_parallel_approval_run()
+
+    await _start_parallel_run(run_id)
+    jobs = list(fake_parallel_queue.jobs)
+    await _run_branch(jobs[0])
+    await _run_branch(jobs[1])
+
+    async with TestingSessionLocal() as db:
+        run = await db.get(Run, run_id)
+        branch = (await db.execute(select(BranchExecution).where(BranchExecution.run_id == run_id))).scalar_one()
+        approval_step_execution = (
+            await db.execute(
+                select(StepExecution).where(
+                    StepExecution.run_id == run_id,
+                    StepExecution.step_key == "approval_group.approve",
+                )
+            )
+        ).scalar_one()
+        notify_step_execution = (
+            await db.execute(
+                select(StepExecution).where(
+                    StepExecution.run_id == run_id,
+                    StepExecution.step_key == "approval_group.notify",
+                )
+            )
+        ).scalar_one()
+
+    assert run is not None
+    assert run.status == "partially_paused"
+    assert branch.status == "partially_paused"
+    assert branch.completed_branches == 1
+    assert branch.merge_triggered is False
+    assert approval_step_execution.status == "awaiting_approval"
+    assert notify_step_execution.status == "completed"
+
+
+async def test_parallel_group_approval_approve_resumes_branch_and_merges(fake_parallel_queue, monkeypatch):
+    monkeypatch.setattr(approval_step, "_send_approval_email", lambda approval, step, context: None)
+
+    async def fake_execute(tool_name, action, params, credentials):
+        return ToolResult(success=True, data={"url": params["url"]})
+
+    monkeypatch.setattr(ToolRegistry, "execute", fake_execute)
+    run_id = await _create_parallel_approval_run()
+
+    await _start_parallel_run(run_id)
+    for job in list(fake_parallel_queue.jobs):
+        await _run_branch(job)
+
+    async with TestingSessionLocal() as db:
+        await executor.resume_run(run_id, "approval_group.approve", db)
+
+    run = await _get_run(run_id)
+    async with TestingSessionLocal() as db:
+        branch = (await db.execute(select(BranchExecution).where(BranchExecution.run_id == run_id))).scalar_one()
+
+    assert run.status == "completed"
+    assert branch.status == "completed"
+    assert branch.completed_branches == 2
+    assert run.context["approval_group"]["branches"]["approve"]["approved"] is True
+
+
+async def test_parallel_group_approval_reject_fails_branch_and_parent(client, fake_parallel_queue, monkeypatch):
+    monkeypatch.setattr(approval_step, "_send_approval_email", lambda approval, step, context: None)
+
+    async def fake_execute(tool_name, action, params, credentials):
+        return ToolResult(success=True, data={"url": params["url"]})
+
+    monkeypatch.setattr(ToolRegistry, "execute", fake_execute)
+    run_id = await _create_parallel_approval_run()
+
+    await _start_parallel_run(run_id)
+    for job in list(fake_parallel_queue.jobs):
+        await _run_branch(job)
+
+    async with TestingSessionLocal() as db:
+        approval = (await db.execute(select(Approval).where(Approval.run_id == run_id))).scalar_one()
+
+    response = await client.post(f"/api/v1/approvals/{approval.token}/reject")
+
+    assert response.status_code == 200
+    run = await _get_run(run_id)
+    async with TestingSessionLocal() as db:
+        branch = (await db.execute(select(BranchExecution).where(BranchExecution.run_id == run_id))).scalar_one()
+        approval_step_execution = (
+            await db.execute(
+                select(StepExecution).where(
+                    StepExecution.run_id == run_id,
+                    StepExecution.step_key == "approval_group.approve",
+                )
+            )
+        ).scalar_one()
+
+    assert run.status == "failed"
+    assert branch.status == "failed"
+    assert branch.failed_branches == 1
+    assert approval_step_execution.status == "failed"

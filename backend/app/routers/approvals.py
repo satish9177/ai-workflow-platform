@@ -13,6 +13,7 @@ from app.auth import decode_approval_token
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.engine.executor import resume_branch_approval
 from app.models.approval import Approval
 from app.models.run import Run
 from app.models.step_execution import StepExecution
@@ -156,13 +157,15 @@ async def reject(
     approval.status = "rejected"
     approval.responded_at = now
 
-    run = await db.get(Run, approval.run_id)
-    if run is not None:
-        run.status = "failed"
-        run.error = "Rejected by approver"
-        run.completed_at = now
+    handled_branch = await resume_branch_approval(approval.run_id, approval.step_id, False, db)
+    if not handled_branch:
+        run = await db.get(Run, approval.run_id)
+        if run is not None:
+            run.status = "failed"
+            run.error = "Rejected by approver"
+            run.completed_at = now
 
-    await _fail_rejected_approval_step(approval, db, now)
-    await db.commit()
+        await _fail_rejected_approval_step(approval, db, now)
+        await db.commit()
     await db.refresh(approval)
     return approval
