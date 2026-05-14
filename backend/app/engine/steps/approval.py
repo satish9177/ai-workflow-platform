@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import create_approval_token
@@ -26,16 +28,44 @@ async def run_approval_step(
 ) -> None:
     rendered_step = render_template_object(step, context)
     approver_email = rendered_step.get("approver_email") or rendered_step.get("approver_email_template")
+    step_id = rendered_step["id"]
+    existing = (
+        await db.execute(
+            select(Approval).where(
+                Approval.run_id == run_id,
+                Approval.step_id == step_id,
+                Approval.status == "pending",
+            )
+        )
+    ).scalars().first()
+    if existing is not None:
+        raise ApprovalRequiredException(existing.id)
+
     approval = Approval(
         run_id=run_id,
-        step_id=rendered_step["id"],
+        step_id=step_id,
         token=f"pending-{uuid.uuid4()}",
         context=context,
         approver_email=approver_email,
         expires_at=datetime.now(timezone.utc) + timedelta(hours=rendered_step.get("expires_hours", 24)),
     )
-    db.add(approval)
-    await db.flush()
+    try:
+        async with db.begin_nested():
+            db.add(approval)
+            await db.flush()
+    except IntegrityError:
+        existing = (
+            await db.execute(
+                select(Approval).where(
+                    Approval.run_id == run_id,
+                    Approval.step_id == step_id,
+                    Approval.status == "pending",
+                )
+            )
+        ).scalars().first()
+        if existing is not None:
+            raise ApprovalRequiredException(existing.id)
+        raise
 
     approval.token = create_approval_token(approval.id, approval.approver_email, rendered_step.get("expires_hours", 24))
     await db.commit()

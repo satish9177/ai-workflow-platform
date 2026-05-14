@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,16 @@ from app.models.base import Base
 
 class StepExecution(Base):
     __tablename__ = "step_executions"
+    __table_args__ = (
+        Index(
+            "uq_step_executions_foreach_iteration",
+            "run_id",
+            "step_key",
+            "foreach_index",
+            unique=True,
+            postgresql_where=text("foreach_index IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
