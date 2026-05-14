@@ -18,6 +18,7 @@ import structlog
 
 from app.config import settings
 from app.database import AsyncSessionLocal
+from app.engine.approval_timeouts import poll_approval_timeouts
 from app.logging import configure_logging
 from app.llm.registry import register_configured_providers
 from app.models.run import Run
@@ -128,6 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     register_configured_providers(settings)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_poll_cron_triggers, "interval", minutes=1)
+    scheduler.add_job(poll_approval_timeouts, "interval", seconds=10)
     scheduler.start()
     try:
         yield

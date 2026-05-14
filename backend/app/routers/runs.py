@@ -90,7 +90,7 @@ async def get_run_timeline(
         .where(BranchExecution.run_id == run_id)
         .order_by(BranchExecution.created_at.asc())
     )
-    failed_step = next((step for step in steps if step.status == "failed"), None)
+    failed_step = next((step for step in steps if step.status in {"failed", "auto_rejected"}), None)
     return {
         "run": run,
         "steps": steps,
