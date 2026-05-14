@@ -2,10 +2,15 @@ import type { ReactNode } from "react";
 import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
 
 import Approvals from "./pages/Approvals";
+import Integrations from "./pages/Integrations";
 import Login from "./pages/Login";
+import Providers from "./pages/Providers";
 import RunDetail from "./pages/RunDetail";
 import Runs from "./pages/Runs";
+import TemplateDetailPage from "./pages/TemplateDetailPage";
+import TemplatesPage from "./pages/TemplatesPage";
 import Workflows from "./pages/Workflows";
+import WorkflowDetailPage from "./pages/WorkflowDetailPage";
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
   if (!localStorage.getItem("token")) {
@@ -41,6 +46,15 @@ function Layout({ children }: { children: ReactNode }) {
             <NavLink className={({ isActive }) => (isActive ? "nav-link-active" : "nav-link")} to="/approvals">
               Approvals
             </NavLink>
+            <NavLink className={({ isActive }) => (isActive ? "nav-link-active" : "nav-link")} to="/providers">
+              Providers
+            </NavLink>
+            <NavLink className={({ isActive }) => (isActive ? "nav-link-active" : "nav-link")} to="/integrations">
+              Integrations
+            </NavLink>
+            <NavLink className={({ isActive }) => (isActive ? "nav-link-active" : "nav-link")} to="/templates">
+              Templates
+            </NavLink>
             <button className="btn-secondary" onClick={logout}>
               Logout
             </button>
@@ -67,7 +81,12 @@ export default function App() {
       <Route path="/runs" element={<ProtectedPage><Runs /></ProtectedPage>} />
       <Route path="/runs/:id" element={<ProtectedPage><RunDetail /></ProtectedPage>} />
       <Route path="/workflows" element={<ProtectedPage><Workflows /></ProtectedPage>} />
+      <Route path="/workflows/:id" element={<ProtectedPage><WorkflowDetailPage /></ProtectedPage>} />
       <Route path="/approvals" element={<ProtectedPage><Approvals /></ProtectedPage>} />
+      <Route path="/providers" element={<ProtectedPage><Providers /></ProtectedPage>} />
+      <Route path="/integrations" element={<ProtectedPage><Integrations /></ProtectedPage>} />
+      <Route path="/templates" element={<ProtectedPage><TemplatesPage /></ProtectedPage>} />
+      <Route path="/templates/:id" element={<ProtectedPage><TemplateDetailPage /></ProtectedPage>} />
       <Route path="/" element={<Navigate to="/runs" replace />} />
     </Routes>
   );

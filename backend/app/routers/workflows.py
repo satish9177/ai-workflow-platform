@@ -3,6 +3,7 @@ from typing import Any
 
 from arq import create_pool
 from arq.connections import RedisSettings
+from croniter import croniter
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,7 +77,23 @@ async def update_workflow(
     if workflow is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
 
-    for field, value in payload.model_dump(exclude_none=True).items():
+    update_data = payload.model_dump(exclude_none=True)
+    if update_data.get("trigger_type") == "cron":
+        trigger_config = update_data.get("trigger_config")
+        if not isinstance(trigger_config, dict) or "cron_expression" not in trigger_config:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="cron_expression is required in trigger_config",
+            )
+        cron_expression = trigger_config["cron_expression"]
+        if not croniter.is_valid(cron_expression):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid cron expression",
+            )
+        update_data["trigger_config"] = {**trigger_config, "cron": cron_expression}
+
+    for field, value in update_data.items():
         setattr(workflow, field, value)
 
     await db.commit()
