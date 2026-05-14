@@ -35,7 +35,7 @@ def _validate_concurrency_limit(step: dict[str, Any], step_label: str) -> None:
         raise ValueError(f"{step_label}: concurrency_limit must be greater than 0")
 
 
-def _validate_step(step: dict[str, Any], step_label: str, foreach_depth: int) -> None:
+def _validate_step(step: dict[str, Any], step_label: str, foreach_depth: int, parallel_depth: int) -> None:
     step_id = step.get("id")
     if not isinstance(step_id, str) or not step_id.strip():
         raise ValueError(f"{step_label}: id is required")
@@ -72,11 +72,18 @@ def _validate_step(step: dict[str, Any], step_label: str, foreach_depth: int) ->
         if not step.get("condition"):
             raise ValueError(f"{step_label}: condition is required for condition steps")
     elif step_type == "parallel_group":
+        if parallel_depth >= 1:
+            raise ValueError(f"{step_label}: nested parallel_group is not supported")
         _validate_concurrency_limit(step, step_label)
         child_steps = step.get("steps")
         if not isinstance(child_steps, list) or not child_steps:
             raise ValueError(f"{step_label}: parallel_group steps must not be empty")
-        validate_workflow_steps(child_steps, foreach_depth=foreach_depth, label_prefix=f"{step_label}.steps")
+        validate_workflow_steps(
+            child_steps,
+            foreach_depth=foreach_depth,
+            parallel_depth=parallel_depth + 1,
+            label_prefix=f"{step_label}.steps",
+        )
     elif step_type == "foreach":
         if foreach_depth >= 1:
             raise ValueError(f"{step_label}: nested foreach depth greater than 1 is not supported")
@@ -92,17 +99,23 @@ def _validate_step(step: dict[str, Any], step_label: str, foreach_depth: int) ->
         child_step = step.get("step")
         if not isinstance(child_step, dict):
             raise ValueError(f"{step_label}: step is required for foreach steps")
-        validate_workflow_steps([child_step], foreach_depth=foreach_depth + 1, label_prefix=f"{step_label}.step")
+        validate_workflow_steps(
+            [child_step],
+            foreach_depth=foreach_depth + 1,
+            parallel_depth=parallel_depth,
+            label_prefix=f"{step_label}.step",
+        )
 
 
 def validate_workflow_steps(
     steps: list[dict[str, Any]],
     foreach_depth: int = 0,
+    parallel_depth: int = 0,
     label_prefix: str = "Step",
 ) -> list[dict[str, Any]]:
     for index, step in enumerate(steps):
         step_label = f"{label_prefix} {index + 1}" if label_prefix == "Step" else f"{label_prefix}[{index + 1}]"
-        _validate_step(step, step_label, foreach_depth)
+        _validate_step(step, step_label, foreach_depth, parallel_depth)
 
     return steps
 
