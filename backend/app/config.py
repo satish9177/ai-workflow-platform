@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     cors_origins: list[str] = ["http://localhost:5173"]
     log_level: str = "INFO"
+    db_pool_size: int = 25
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30
+    db_pool_recycle: int = 1800
+    db_command_timeout: int = 30
+    db_connect_timeout: int = 10
+    db_statement_timeout_ms: int = 60000
+    db_idle_in_transaction_session_timeout_ms: int = 30000
+    db_connection_hold_warn_seconds: float = 5.0
+    arq_max_jobs: int = 10
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -47,6 +57,11 @@ class Settings(BaseSettings):
 
         if not self.openai_api_key:
             logging.getLogger(__name__).warning("OPENAI_API_KEY is not configured")
+
+        if self.db_pool_size < self.arq_max_jobs:
+            logging.getLogger(__name__).warning(
+                "DB_POOL_SIZE is smaller than ARQ_MAX_JOBS; DB pool pressure may increase"
+            )
 
         return self
 

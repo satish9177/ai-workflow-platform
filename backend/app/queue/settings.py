@@ -11,7 +11,7 @@ async def startup(ctx):
 class WorkerSettings:
     functions = [execute_workflow, resume_workflow, execute_parallel_branch_job, execute_foreach_iteration_job]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
-    max_jobs = 10
+    max_jobs = settings.arq_max_jobs
     job_timeout = 300
     keep_result = 3600
     retry_jobs = True
