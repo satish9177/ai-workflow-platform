@@ -1,18 +1,18 @@
-# AI Workflow Platform
+# AI Workflow Automation Platform
 
-An internal AI workflow automation MVP for building, running, and monitoring workflows that combine LLM prompts, tool calls, human approvals, cron triggers, and webhooks.
+An internal AI workflow orchestration platform for building, running, and debugging workflows that combine LLM prompts, tool calls, human approvals, cron triggers, webhooks, integrations, and V2 orchestration containers.
 
-The project is intentionally simple: one FastAPI backend, one React frontend, PostgreSQL for durable state, Redis/ARQ for background execution, and Docker Compose for local and production-style deployment.
+The architecture is intentionally pragmatic: one FastAPI backend, one React frontend, PostgreSQL for durable orchestration state, Redis/ARQ for background jobs, APScheduler for lightweight polling, and Docker Compose for local and production-style deployment.
 
 ## Architecture Summary
 
-- **Frontend**: Vite + React dashboard for runs, workflows, approvals, and login.
-- **Backend API**: FastAPI routes for auth, workflows, runs, approvals, integrations, and webhooks.
-- **Database**: PostgreSQL stores users, workflows, runs, step results, approvals, integrations, and conversation memory.
-- **Worker**: ARQ executes and resumes workflow runs from Redis jobs.
-- **Scheduler**: APScheduler polls active cron workflows once per minute and enqueues due runs.
-- **Engine**: deterministic executor processes workflow steps, persists step results, pauses for approvals, and resumes from completed steps.
-- **Ingress**: Nginx production config proxies `/api/` and `/webhooks/` to the API.
+- **Execution model**: linear-with-groups, not a general DAG runtime.
+- **Backend API**: FastAPI routes for auth, workflows, runs, approvals, integrations, LLM providers, and webhooks.
+- **Workflow engine**: deterministic executor with `parallel_group`, `foreach`, `switch`, approvals, retries, and resumable execution.
+- **Database**: PostgreSQL stores workflows, runs, step results, step executions, branch executions, approvals, integrations, and memory.
+- **Worker**: ARQ executes runs, resumes approvals, and processes parallel/foreach child jobs.
+- **Scheduler**: APScheduler polls cron workflows and pending approval timeouts.
+- **Frontend**: React dashboard for runs, timelines, workflows, approvals, integrations, providers, and templates.
 
 ## Tech Stack
 
@@ -20,9 +20,24 @@ The project is intentionally simple: one FastAPI backend, one React frontend, Po
 - Queue: Redis, ARQ
 - Scheduler: APScheduler, croniter
 - Auth: JWT via python-jose, passlib bcrypt
-- Tools: HTTP, SMTP, WhatsApp, OpenAI LLM step
+- LLM: provider abstraction for OpenAI, Anthropic, Gemini, and mock tests
+- Tools: HTTP, Slack, Discord, SMTP email, WhatsApp
 - Frontend: Vite, React 18, TypeScript, TailwindCSS, TanStack Query, React Router, Axios
 - Deployment: Docker Compose, Nginx
+
+## Key Documentation
+
+- [Architecture](docs/architecture.md)
+- [Orchestration Design](docs/orchestration.md)
+- [Workflows](docs/workflows.md)
+- [Backend](docs/backend.md)
+- [Frontend](docs/frontend.md)
+- [API Overview](docs/api-overview.md)
+- [Deployment](docs/deployment.md)
+- [Testing and Debugging](docs/testing.md)
+- [Roadmap](docs/roadmap.md)
+- [Architecture Decisions](docs/decisions/)
+- [Bug and Race-Condition Notes](docs/bugs/)
 
 ## Local Development Setup
 
@@ -60,7 +75,7 @@ Start the local stack:
 docker compose up
 ```
 
-Run migrations against the Docker API service:
+Run migrations:
 
 ```bash
 docker compose run --rm api alembic upgrade head
@@ -120,10 +135,11 @@ Key values:
 - `DATABASE_URL`: async PostgreSQL URL
 - `REDIS_URL`: Redis URL for ARQ
 - `SECRET_KEY`: JWT signing secret
-- `ENCRYPTION_KEY`: 32-byte hex key used for Fernet credential encryption
-- `OPENAI_API_KEY`: optional in development, required for real LLM steps
+- `ENCRYPTION_KEY`: credential encryption key
+- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`: provider API keys
 - `CORS_ORIGINS`: comma-separated frontend origins
 - `APP_BASE_URL`: base URL used for approval links
+- `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `ARQ_MAX_JOBS`: database/worker sizing
 
 Frontend variables are documented in `frontend/.env.example`.
 
@@ -154,40 +170,68 @@ docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
 Placeholder screenshots to add later:
 
 - Runs dashboard
-- Run detail page
-- Workflow list
+- Run timeline
+- Workflow detail/editor
+- Integrations
 - Pending approvals
 
-## Example Workflow JSON
+## Example V2 Workflow JSON
 
 ```json
 {
-  "name": "HTTP check with approval",
-  "description": "Fetch a URL, evaluate the result, then ask for human approval.",
-  "trigger_type": "manual",
-  "trigger_config": {},
+  "name": "Webhook triage with routing",
+  "trigger_type": "webhook",
+  "trigger_config": {
+    "secret": "replace-with-random-secret"
+  },
   "steps": [
     {
-      "id": "fetch_status",
-      "type": "tool",
-      "tool": "http_request",
-      "action": "execute",
-      "params": {
-        "method": "GET",
-        "url": "https://example.com"
+      "id": "triage",
+      "type": "llm",
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "prompt": "Classify as urgent or normal: {{ trigger_data.body.message }}",
+      "output_as": "triage_result"
+    },
+    {
+      "id": "route_by_priority",
+      "type": "switch",
+      "on": "{{ triage_result.response }}",
+      "on_no_match": "skip",
+      "branches": {
+        "urgent": [
+          {
+            "id": "approval",
+            "type": "approval",
+            "approver_email": "manager@example.com",
+            "message": "Approve urgent Slack alert?",
+            "timeout_seconds": 300,
+            "timeout_action": "reject"
+          },
+          {
+            "id": "send_alert",
+            "type": "tool",
+            "tool": "slack",
+            "action": "send_message",
+            "params": {
+              "text": "{{ trigger_data.body.message }}"
+            }
+          }
+        ],
+        "normal": [
+          {
+            "id": "send_email",
+            "type": "tool",
+            "tool": "email",
+            "action": "send_email",
+            "params": {
+              "to": "ops@example.com",
+              "subject": "Normal workflow item",
+              "body": "{{ trigger_data.body.message }}"
+            }
+          }
+        ]
       }
-    },
-    {
-      "id": "is_success",
-      "type": "condition",
-      "condition": "fetch_status.data|length > 0",
-      "if_true": "approve",
-      "if_false": null
-    },
-    {
-      "id": "approve",
-      "type": "approval",
-      "approver_email": "developer@example.com"
     }
   ]
 }

@@ -1,59 +1,136 @@
 # Architecture
 
-The platform is a compact workflow automation MVP. It keeps the architecture intentionally direct: FastAPI handles HTTP APIs, PostgreSQL stores workflow state, Redis/ARQ handles background jobs, and a React dashboard provides an internal operator UI.
+This platform is a lightweight AI workflow orchestration system. It intentionally stays below the complexity line of Temporal, Airflow, event sourcing, actor systems, or a general DAG runtime.
 
-## Workflow Engine
+The central model is **linear-with-groups**:
 
-The engine loads a `Run` and its `Workflow`, then walks the workflow's JSON `steps` in order. Each step is executed by type and persisted to `step_results`. Completed steps are skipped when a run resumes, which makes approval resume behavior deterministic.
+```text
+workflow run
+  step A
+  parallel_group / foreach / switch container
+    scoped child step executions
+  step D
+```
 
-Supported execution outcomes:
+Top-level workflows remain ordered lists. Some steps are containers that execute scoped child steps, then return control to the parent sequence.
 
-- `completed`: all steps finished
-- `failed`: a step or workflow lookup failed
-- `paused`: an approval step is waiting for a human response
-- `cancelled`: a user cancelled the run
+## System Components
 
-## Runs
+- **FastAPI API**: authentication, workflow CRUD, runs, approvals, webhooks, integrations, LLM provider metadata.
+- **PostgreSQL**: durable source of truth for workflows, runs, step results, step executions, branch executions, approvals, integrations, and memory.
+- **Redis + ARQ**: background job queue for workflow execution, approval resume, parallel branches, and foreach iterations.
+- **APScheduler**: lightweight in-process polling for cron triggers and approval timeouts.
+- **React dashboard**: internal operator UI for workflows, runs, timelines, approvals, integrations, providers, and templates.
 
-A run is a single execution of a workflow. Runs store trigger data, execution context, current step, timestamps, and error state. Step outputs are also copied into the run context so later steps can reference earlier results.
+## Durable Execution State
 
-## Approvals
+The engine persists several layers of state:
 
-Approval steps create an `Approval` row, email an approval link when SMTP is configured, and pause the run. Approve/reject routes are public token routes. Approval resumes enqueue an ARQ job instead of executing inline.
+- `workflow_runs`: run-level lifecycle, trigger data, context, current step, and error state.
+- `step_results`: logical step outputs used for resume and context reconstruction.
+- `step_executions`: timeline-oriented lifecycle records for every visible step/container/branch.
+- `branch_executions`: fan-out/fan-in coordination for `parallel_group` and `foreach`.
+- `approvals`: human approval tokens, pending/resolved state, timeout metadata.
 
-## Resumable Execution
+`step_results` answer “has this logical step completed?” while `step_executions` answer “what happened and when?”.
 
-When an approval is accepted, `resume_run` marks the approval step completed and calls `execute_run` again. The executor skips completed step results and continues from the next pending step.
+## Orchestration Model
 
-## ARQ Workers
+The executor processes top-level steps in order. For normal steps it dispatches directly. For containers:
 
-Redis stores ARQ jobs. The worker exposes:
+- `parallel_group`: creates a `branch_execution`, enqueues one branch job per child step, waits for all branches to reach terminal state, merges deterministic branch output.
+- `foreach`: resolves items once, persists them on `branch_executions.foreach_items`, enqueues bounded iteration jobs, waits for all iterations to reach terminal state, aggregates results.
+- `switch`: renders a branch key, persists selected branch metadata, creates skipped/selected branch timeline rows, executes exactly one selected branch inline, and continues.
 
-- `execute_workflow(ctx, run_id)`
-- `resume_workflow(ctx, run_id, step_id)`
+Container steps do not create child workflow runs. All child execution remains under the same `workflow_runs.id`.
 
-The API enqueues work and returns immediately.
+## Namespacing
 
-## Cron Polling
+Nested execution uses dotted step keys:
 
-The FastAPI lifespan starts an APScheduler job that polls active cron-triggered workflows every minute. Due workflows create pending runs and enqueue `execute_workflow`.
+```text
+parallel_group: notify_group.email
+foreach:        approve_each.2.approve
+switch:         route_by_priority.urgent.send_alert
+```
 
-## Webhook Triggers
+This namespacing is a core invariant. It prevents collisions between repeated child IDs and makes timeline debugging readable.
 
-Webhook routes accept public POSTs at `/webhooks/{workflow_id}` with a token query parameter. A valid token creates a pending run and enqueues execution.
+## Context Model
 
-## Tool System
+The run context is shared and JSON-based. Later steps can read:
 
-Tools implement a small `BaseTool` interface and are registered in `ToolRegistry`. Current tools include HTTP requests, SMTP email, and WhatsApp messaging. Integration credentials are encrypted before storage.
+- `trigger_data`
+- prior step outputs by step ID
+- `output_as` aliases
+- foreach variables: `foreach.item`, `foreach.index`
+- switch metadata: `switch_id.__branch__`, `switch_id.__evaluated__`
 
-## Memory and Context
+V2 does not isolate switch branch context. Parallel and foreach children read ancestor context, but sibling outputs are merged only through deterministic container outputs.
 
-Conversation memory is stored in `conversation_turns`. LLM steps can build OpenAI-style message lists from saved history plus the new user prompt. Run context carries trigger data and step outputs during execution.
+## Approval Lifecycle
 
-## PostgreSQL and Redis
+Approval steps create an `approvals` row and pause execution:
 
-PostgreSQL is used for durable workflow state, auditability, approvals, and result history. Redis is used only for queueing background jobs through ARQ.
+- linear approval: run status becomes `paused`
+- branch/iteration approval: run and branch can become `partially_paused`
+
+Approve/reject routes update approval state and reuse existing resume/fail paths. Approval timeouts are handled by APScheduler polling pending approvals with configured timeout metadata. Timeout approve behaves like approval; timeout reject behaves like rejection.
+
+## Observability
+
+The timeline API is built from `step_executions` and `branch_executions`.
+
+Timeline records include:
+
+- step hierarchy via `parent_step_id`
+- dotted `step_key`
+- branch/foreach metadata
+- lifecycle status
+- attempts
+- provider/model/tool metadata
+- sanitized input/output previews
+- structured error details
+
+This is intentionally not event sourcing. It is compact lifecycle observability for debugging current V2 orchestration.
+
+## Workers and Jobs
+
+ARQ workers expose:
+
+- `execute_workflow`
+- `resume_workflow`
+- `execute_parallel_branch_job`
+- `execute_foreach_iteration_job`
+
+The API enqueues work and returns quickly. Worker jobs open async SQLAlchemy sessions, preserve business exceptions, and log rollback/close infrastructure warnings without masking original execution failures.
+
+## DB-Backed Invariants
+
+Important invariants are enforced in the database where app-level checks proved race-prone:
+
+- one pending approval per `run_id + step_id`
+- one foreach `StepExecution` per `run_id + step_key + foreach_index`
+- durable `foreach_items` so retries do not re-resolve item lists
+- durable switch branch selection so retries do not re-evaluate routing
+
+These constraints are part of the orchestration design, not incidental schema details.
+
+## Why PostgreSQL and Redis
+
+PostgreSQL stores all correctness-critical state. Redis only queues ARQ jobs. If Redis loses a job, persisted run/branch/step state remains inspectable and recoverable by targeted requeue/retry paths.
 
 ## Explicit Non-Goals
 
-The MVP intentionally avoids Temporal, Kubernetes, vector databases, sandboxed code execution, planner agents, and microservices. Those tools add operational weight before the core workflow model needs them.
+The current system intentionally does not implement:
+
+- arbitrary DAG execution
+- dynamic graph rewrites
+- distributed workflow replay
+- event sourcing
+- Temporal-style timers
+- provider fallback chains
+- object storage for large payloads
+- Kubernetes-native orchestration
+
+Those may be revisited only when the product need justifies their operational cost.
