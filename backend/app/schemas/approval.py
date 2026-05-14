@@ -15,6 +15,8 @@ class ApprovalRead(BaseModel):
     context: dict[str, Any] | None
     approver_email: str
     expires_at: datetime
+    timeout_action: str | None = None
+    timed_out_at: datetime | None = None
     responded_at: datetime | None
     created_at: datetime
 

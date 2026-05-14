@@ -29,5 +29,7 @@ class Approval(Base):
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     approver_email: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    timeout_action: Mapped[str | None] = mapped_column(String, nullable=True)
+    timed_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

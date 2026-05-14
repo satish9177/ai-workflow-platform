@@ -29,7 +29,11 @@ from app.utils.template_renderer import render_template_object
 
 
 logger = structlog.get_logger(__name__)
-TERMINAL_BRANCH_STATUSES = {"completed", "failed", "cancelled"}
+APPROVAL_AUTO_APPROVED_STATUS = "auto_approved"
+APPROVAL_AUTO_REJECTED_STATUS = "auto_rejected"
+COMPLETED_STEP_STATUSES = {"completed", APPROVAL_AUTO_APPROVED_STATUS}
+FAILED_STEP_STATUSES = {"failed", APPROVAL_AUTO_REJECTED_STATUS}
+TERMINAL_BRANCH_STATUSES = COMPLETED_STEP_STATUSES | FAILED_STEP_STATUSES | {"cancelled"}
 ACTIVE_FOREACH_STATUSES = {"running"}
 RECOVERABLE_FOREACH_STATUSES = {"queued"}
 DEFAULT_FOREACH_CONCURRENCY_LIMIT = 10
@@ -243,9 +247,11 @@ async def _finish_step_execution(
     return step_execution
 
 
-def _error_details(error: Exception | str | None) -> dict[str, Any] | None:
+def _error_details(error: Exception | str | dict[str, Any] | None) -> dict[str, Any] | None:
     if error is None:
         return None
+    if isinstance(error, dict):
+        return error
     if isinstance(error, ProviderExecutionError):
         return error.to_error_details()
     return {"message": str(error)}
@@ -996,30 +1002,68 @@ async def _finish_branch_approval(
     run_id: str,
     step_id: str,
     approved: bool,
+    timed_out: bool = False,
+    timeout_action: str | None = None,
 ) -> tuple[StepExecution | None, BranchExecution | None]:
     step_execution = await _get_existing_step_execution(db, run_id, step_id)
     if step_execution is None or step_execution.branch_execution_id is None:
         return step_execution, None
 
-    status = "completed" if approved else "failed"
+    step_execution_status = (
+        APPROVAL_AUTO_APPROVED_STATUS
+        if timed_out and approved
+        else APPROVAL_AUTO_REJECTED_STATUS
+        if timed_out
+        else "completed"
+        if approved
+        else "failed"
+    )
+    step_result_status = "completed" if approved else "failed"
     output = {"approved": approved}
-    error = None if approved else APPROVAL_REJECTED_ERROR
+    if timed_out:
+        output.update(
+            {
+                "timed_out": True,
+                "timeout_action": timeout_action or ("approve" if approved else "reject"),
+            }
+        )
+    error_message = None if approved else ("Approval timed out" if timed_out else APPROVAL_REJECTED_ERROR)
+    error_details = (
+        {
+            "type": "ApprovalTimedOut",
+            "message": "Approval timed out",
+            "timeout_action": timeout_action or "reject",
+        }
+        if timed_out and not approved
+        else error_message
+    )
     await _upsert_step(
         db,
         run_id,
         step_id,
         "approval",
-        status,
+        step_result_status,
         output=output if approved else None,
-        error=error,
+        error=error_message,
     )
     await _finish_step_execution(
         db,
         step_execution,
-        status,
+        step_execution_status,
         attempt_number=1,
-        error=error,
-        output_preview={"approved": approved, "status": "approved" if approved else "rejected"},
+        error=error_details,
+        output_preview={
+            **output,
+            "status": (
+                "auto_approved"
+                if timed_out and approved
+                else "auto_rejected"
+                if timed_out
+                else "approved"
+                if approved
+                else "rejected"
+            ),
+        },
     )
     branch_execution = await db.get(BranchExecution, step_execution.branch_execution_id)
     return step_execution, branch_execution
@@ -1031,12 +1075,16 @@ async def _resume_parallel_branch_approval(
     run_id: str,
     step_id: str,
     approved: bool,
+    timed_out: bool = False,
+    timeout_action: str | None = None,
 ) -> bool:
     _step_execution, branch_execution = await _finish_branch_approval(
         db,
         run_id=run_id,
         step_id=step_id,
         approved=approved,
+        timed_out=timed_out,
+        timeout_action=timeout_action,
     )
     if branch_execution is None or branch_execution.branch_type != "parallel_group":
         return False
@@ -1144,8 +1192,8 @@ async def _sync_foreach_branch_counters(db: AsyncSession, branch_execution_id: s
     )
     rows = result.all()
     statuses = [status for _index, status in rows]
-    branch_execution.completed_branches = sum(1 for status in statuses if status == "completed")
-    branch_execution.failed_branches = sum(1 for status in statuses if status == "failed")
+    branch_execution.completed_branches = sum(1 for status in statuses if status in COMPLETED_STEP_STATUSES)
+    branch_execution.failed_branches = sum(1 for status in statuses if status in FAILED_STEP_STATUSES)
     branch_execution.cancelled_branches = max(
         branch_execution.cancelled_branches,
         sum(1 for status in statuses if status == "cancelled"),
@@ -1377,12 +1425,16 @@ async def _resume_foreach_iteration_approval(
     run_id: str,
     step_id: str,
     approved: bool,
+    timed_out: bool = False,
+    timeout_action: str | None = None,
 ) -> bool:
     step_execution, branch_execution = await _finish_branch_approval(
         db,
         run_id=run_id,
         step_id=step_id,
         approved=approved,
+        timed_out=timed_out,
+        timeout_action=timeout_action,
     )
     if (
         step_execution is None
@@ -1428,11 +1480,111 @@ async def _resume_foreach_iteration_approval(
     return True
 
 
-async def resume_branch_approval(run_id: str, step_id: str, approved: bool, db: AsyncSession) -> bool:
-    if await _resume_parallel_branch_approval(db, run_id=run_id, step_id=step_id, approved=approved):
+async def resume_branch_approval(
+    run_id: str,
+    step_id: str,
+    approved: bool,
+    db: AsyncSession,
+    *,
+    timed_out: bool = False,
+    timeout_action: str | None = None,
+) -> bool:
+    if await _resume_parallel_branch_approval(
+        db,
+        run_id=run_id,
+        step_id=step_id,
+        approved=approved,
+        timed_out=timed_out,
+        timeout_action=timeout_action,
+    ):
         return True
-    if await _resume_foreach_iteration_approval(db, run_id=run_id, step_id=step_id, approved=approved):
+    if await _resume_foreach_iteration_approval(
+        db,
+        run_id=run_id,
+        step_id=step_id,
+        approved=approved,
+        timed_out=timed_out,
+        timeout_action=timeout_action,
+    ):
         return True
+    return False
+
+
+async def reject_approval(
+    run_id: str,
+    step_id: str,
+    db: AsyncSession,
+    *,
+    timed_out: bool = False,
+    timeout_action: str | None = None,
+) -> bool:
+    if await resume_branch_approval(
+        run_id,
+        step_id,
+        False,
+        db,
+        timed_out=timed_out,
+        timeout_action=timeout_action,
+    ):
+        return True
+
+    now = datetime.now(timezone.utc)
+    run = await db.get(Run, run_id)
+    if run is not None:
+        run.status = "failed"
+        run.error = "Approval timed out" if timed_out else APPROVAL_REJECTED_ERROR
+        run.completed_at = now
+
+    step_execution = await _get_existing_step_execution(db, run_id, step_id)
+    if step_execution is None:
+        result = await db.execute(
+            select(StepExecution)
+            .where(StepExecution.run_id == run_id, StepExecution.status == "awaiting_approval")
+            .order_by(StepExecution.started_at.desc().nullslast(), StepExecution.created_at.desc())
+        )
+        step_execution = result.scalars().first()
+
+    await _upsert_step(
+        db,
+        run_id,
+        step_id,
+        "approval",
+        "failed",
+        error="Approval timed out" if timed_out else APPROVAL_REJECTED_ERROR,
+    )
+    if step_execution is not None:
+        error_details: dict[str, Any] | str = (
+            {
+                "type": "ApprovalTimedOut",
+                "message": "Approval timed out",
+                "timeout_action": timeout_action or "reject",
+            }
+            if timed_out
+            else {
+                "type": "ApprovalRejected",
+                "message": APPROVAL_REJECTED_ERROR,
+            }
+        )
+        await _finish_step_execution(
+            db,
+            step_execution,
+            APPROVAL_AUTO_REJECTED_STATUS if timed_out else "failed",
+            attempt_number=1,
+            error=error_details,
+            output_preview={
+                "approved": False,
+                "status": "auto_rejected" if timed_out else "rejected",
+                **({"timed_out": True, "timeout_action": timeout_action or "reject"} if timed_out else {}),
+            },
+        )
+    else:
+        logger.warning(
+            "approval.reject_step_execution_not_found",
+            run_id=run_id,
+            step_id=step_id,
+            timed_out=timed_out,
+        )
+    await db.commit()
     return False
 
 
@@ -2165,8 +2317,30 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
         logger.exception("run.failed", run_id=run_id, workflow_id=workflow.id, error=str(exc))
 
 
-async def resume_run(run_id: str, step_id: str, db: AsyncSession) -> None:
-    if await resume_branch_approval(run_id, step_id, True, db):
+async def resume_run(
+    run_id: str,
+    step_id: str,
+    db: AsyncSession,
+    *,
+    timed_out: bool = False,
+    timeout_action: str | None = None,
+) -> None:
+    approval_output = {"approved": True}
+    if timed_out:
+        approval_output.update(
+            {
+                "timed_out": True,
+                "timeout_action": timeout_action or "approve",
+            }
+        )
+    if await resume_branch_approval(
+        run_id,
+        step_id,
+        True,
+        db,
+        timed_out=timed_out,
+        timeout_action=timeout_action,
+    ):
         logger.info("branch_approval.resumed", run_id=run_id, step_id=step_id)
         return
 
@@ -2176,16 +2350,19 @@ async def resume_run(run_id: str, step_id: str, db: AsyncSession) -> None:
         step_id,
         "approval",
         "completed",
-        output={"approved": True},
+        output=approval_output,
     )
     step_execution = await _get_existing_step_execution(db, run_id, step_id)
     if step_execution is not None:
         await _finish_step_execution(
             db,
             step_execution,
-            "completed",
+            APPROVAL_AUTO_APPROVED_STATUS if timed_out else "completed",
             attempt_number=1,
-            output_preview={"approved": True},
+            output_preview={
+                **approval_output,
+                "status": "auto_approved" if timed_out else "approved",
+            },
         )
     run = await db.get(Run, run_id)
     if run is not None:

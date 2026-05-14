@@ -68,6 +68,20 @@ def _validate_step(step: dict[str, Any], step_label: str, foreach_depth: int, pa
     elif step_type == "approval":
         if not (step.get("approver_email") or step.get("approver_email_template")):
             raise ValueError(f"{step_label}: approver_email or approver_email_template is required for approval steps")
+        timeout_seconds = step.get("timeout_seconds")
+        if timeout_seconds is not None:
+            if isinstance(timeout_seconds, bool):
+                raise ValueError(f"{step_label}: timeout_seconds must be greater than 0")
+            try:
+                parsed_timeout_seconds = int(timeout_seconds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{step_label}: timeout_seconds must be greater than 0") from exc
+            if parsed_timeout_seconds < 1:
+                raise ValueError(f"{step_label}: timeout_seconds must be greater than 0")
+
+            timeout_action = step.get("timeout_action", "reject")
+            if timeout_action not in {"approve", "reject"}:
+                raise ValueError(f"{step_label}: timeout_action must be approve or reject")
     elif step_type == "condition":
         if not step.get("condition"):
             raise ValueError(f"{step_label}: condition is required for condition steps")
