@@ -292,7 +292,7 @@ async def _dispatch_step(
     if step_type == "approval":
         return await run_approval_step(step, context, run_id, db)
     if step_type == "tool" or ToolRegistry.get(step_type) is not None:
-        return await run_tool_step(step, context, db)
+        return await run_tool_step(step, context, db, run_id=run_id)
     raise ValueError(f"Unsupported step type: {step_type}")
 
 

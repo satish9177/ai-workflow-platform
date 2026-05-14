@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,6 +18,7 @@ class Run(Base):
     trigger_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     current_step: Mapped[str | None] = mapped_column(String, nullable=True)
+    current_branch_depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

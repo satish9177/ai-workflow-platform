@@ -27,6 +27,7 @@ class RunRead(BaseModel):
     trigger_data: dict[str, Any] | None
     context: dict[str, Any] | None
     current_step: str | None
+    current_branch_depth: int
     error: str | None
     started_at: datetime | None
     completed_at: datetime | None
@@ -42,10 +43,14 @@ class StepExecutionRead(BaseModel):
 
     id: str
     run_id: str
+    branch_execution_id: str | None
     step_index: int
     step_key: str
     step_type: str
     step_label: str | None
+    foreach_index: int | None
+    foreach_item: Any | None
+    branch_key: str | None
     status: str
     attempt_number: int
     max_attempts: int

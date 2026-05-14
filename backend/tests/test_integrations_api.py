@@ -81,6 +81,35 @@ async def test_create_smtp_integration_succeeds(client, auth_headers):
     assert response.json()["integration_type"] == "smtp"
 
 
+async def test_create_email_abstraction_integration_type_is_rejected(client, auth_headers):
+    response = await client.post(
+        "/api/v1/integrations",
+        headers=auth_headers,
+        json={
+            "integration_type": "email",
+            "display_name": "Invalid Email Abstraction",
+            "credentials": {
+                "host": "smtp.gmail.com",
+                "port": "587",
+                "username": "you@gmail.com",
+                "password": "secret",
+                "from_email": "you@gmail.com",
+            },
+            "config": {},
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Tool not found"
+
+
+async def test_integrations_list_does_not_expose_email_abstraction_placeholder(client, auth_headers):
+    response = await client.get("/api/v1/integrations", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert "email" not in {row["integration_type"] for row in response.json()}
+
+
 async def test_filter_integrations_by_smtp_type(client, auth_headers):
     await client.post(
         "/api/v1/integrations",

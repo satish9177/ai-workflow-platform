@@ -1,11 +1,14 @@
 import base64
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.engine import make_url
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
 
 from app.config import settings
 from app.database import get_db
@@ -25,7 +28,20 @@ from app.tools.integrations.email.smtp import SmtpEmailProvider
 
 
 router = APIRouter(tags=["integrations"])
+logger = structlog.get_logger(__name__)
 EXTRA_INTEGRATION_TYPES = {"smtp"}
+TOOL_ABSTRACTION_TYPES = {"email"}
+
+
+def _available_integration_types() -> set[str]:
+    return (set(ToolRegistry.all_names()) - TOOL_ABSTRACTION_TYPES) | EXTRA_INTEGRATION_TYPES
+
+
+def _safe_database_name() -> str:
+    try:
+        return make_url(settings.database_url).database or ""
+    except Exception:
+        return "unknown"
 
 
 def _fernet() -> Fernet:
@@ -61,7 +77,7 @@ def _decrypt_credentials(credentials: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_tool(name: str) -> None:
-    if ToolRegistry.get(name) is None and name not in EXTRA_INTEGRATION_TYPES:
+    if name not in _available_integration_types():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool not found")
 
 
@@ -128,7 +144,7 @@ async def list_integrations(
     result = await db.execute(select(Integration).where(Integration.is_enabled.is_(True)).order_by(Integration.created_at.asc()))
     integrations = result.scalars().all()
     configured_types = {integration.integration_type for integration in integrations}
-    available_types = ToolRegistry.all_names() + sorted(EXTRA_INTEGRATION_TYPES)
+    available_types = sorted(_available_integration_types())
     placeholders = [
         _read(None, name)
         for name in available_types
@@ -257,6 +273,12 @@ async def test_integration(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> IntegrationTestResponse:
+    logger.info(
+        "integration.test.resolve.started",
+        integration_id_or_type=name,
+        database=_safe_database_name(),
+        worker_pid=os.getpid(),
+    )
     integration = await db.get(Integration, name)
     if integration is None:
         if ToolRegistry.get(name) is None and name not in EXTRA_INTEGRATION_TYPES:
@@ -268,7 +290,23 @@ async def test_integration(
         )
         integration = result.scalars().first()
         if integration is None:
+            logger.warning(
+                "integration.test.resolve.not_found",
+                integration_id_or_type=name,
+                database=_safe_database_name(),
+                worker_pid=os.getpid(),
+            )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Integration not found")
+
+    logger.info(
+        "integration.test.resolve.row_loaded",
+        integration_id=integration.id,
+        integration_type=integration.integration_type,
+        status=integration.status,
+        is_enabled=integration.is_enabled,
+        database=_safe_database_name(),
+        worker_pid=os.getpid(),
+    )
 
     if integration.integration_type == "smtp":
         tool = None

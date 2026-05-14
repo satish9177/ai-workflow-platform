@@ -14,10 +14,17 @@ class StepExecution(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    branch_execution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("branch_executions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     step_index: Mapped[int] = mapped_column(Integer, nullable=False)
     step_key: Mapped[str] = mapped_column(String, nullable=False)
     step_type: Mapped[str] = mapped_column(String, nullable=False)
     step_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    foreach_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    foreach_item: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    branch_key: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending", nullable=False)
     attempt_number: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

@@ -243,7 +243,7 @@ async def test_email_tool_rejects_non_email_provider_integration(client, auth_he
     slack = await _create_slack(client, auth_headers, "slack")
 
     async with TestingSessionLocal() as db:
-        with pytest.raises(RuntimeError, match=f"Integration not found: {slack['id']}"):
+        with pytest.raises(RuntimeError, match="expected one of: smtp"):
             await run_tool_step(
                 {
                     "id": "email",

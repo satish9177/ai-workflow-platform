@@ -4,7 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-ALLOWED_STEP_TYPES = {"llm", "tool", "approval", "condition"}
+ALLOWED_STEP_TYPES = {"llm", "tool", "approval", "condition", "parallel_group", "foreach"}
 ALLOWED_LLM_PROVIDERS = {"openai", "anthropic", "gemini", "mock"}
 
 
@@ -27,44 +27,82 @@ def apply_trigger_alias(data: Any) -> Any:
     return normalized
 
 
-def validate_workflow_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _validate_concurrency_limit(step: dict[str, Any], step_label: str) -> None:
+    concurrency_limit = step.get("concurrency_limit")
+    if concurrency_limit is None:
+        return
+    if isinstance(concurrency_limit, bool) or not isinstance(concurrency_limit, int) or concurrency_limit < 1:
+        raise ValueError(f"{step_label}: concurrency_limit must be greater than 0")
+
+
+def _validate_step(step: dict[str, Any], step_label: str, foreach_depth: int) -> None:
+    step_id = step.get("id")
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise ValueError(f"{step_label}: id is required")
+
+    step_type = step.get("type")
+    if not isinstance(step_type, str) or not step_type.strip():
+        raise ValueError(f"{step_label}: type is required")
+    if step_type not in ALLOWED_STEP_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_STEP_TYPES))
+        raise ValueError(f"{step_label}: type must be one of: {allowed}")
+
+    if step_type == "llm":
+        if not step.get("prompt"):
+            raise ValueError(f"{step_label}: prompt is required for llm steps")
+        provider = step.get("provider")
+        if provider is not None and provider not in ALLOWED_LLM_PROVIDERS:
+            allowed = ", ".join(sorted(ALLOWED_LLM_PROVIDERS))
+            raise ValueError(f"{step_label}: provider must be one of: {allowed}")
+        temperature = step.get("temperature")
+        if temperature is not None and not 0 <= temperature <= 2:
+            raise ValueError(f"{step_label}: temperature must be between 0 and 2")
+        max_tokens = step.get("max_tokens")
+        if max_tokens is not None and max_tokens <= 0:
+            raise ValueError(f"{step_label}: max_tokens must be greater than 0")
+    elif step_type == "tool":
+        if not step.get("tool"):
+            raise ValueError(f"{step_label}: tool is required for tool steps")
+        if not step.get("action"):
+            raise ValueError(f"{step_label}: action is required for tool steps")
+    elif step_type == "approval":
+        if not (step.get("approver_email") or step.get("approver_email_template")):
+            raise ValueError(f"{step_label}: approver_email or approver_email_template is required for approval steps")
+    elif step_type == "condition":
+        if not step.get("condition"):
+            raise ValueError(f"{step_label}: condition is required for condition steps")
+    elif step_type == "parallel_group":
+        _validate_concurrency_limit(step, step_label)
+        child_steps = step.get("steps")
+        if not isinstance(child_steps, list) or not child_steps:
+            raise ValueError(f"{step_label}: parallel_group steps must not be empty")
+        validate_workflow_steps(child_steps, foreach_depth=foreach_depth, label_prefix=f"{step_label}.steps")
+    elif step_type == "foreach":
+        if foreach_depth >= 1:
+            raise ValueError(f"{step_label}: nested foreach depth greater than 1 is not supported")
+        _validate_concurrency_limit(step, step_label)
+        if step.get("items") in (None, ""):
+            raise ValueError(f"{step_label}: items is required for foreach steps")
+        item_variable = step.get("item_variable")
+        if not isinstance(item_variable, str) or not item_variable.strip():
+            raise ValueError(f"{step_label}: item_variable is required for foreach steps")
+        index_variable = step.get("index_variable")
+        if index_variable is not None and (not isinstance(index_variable, str) or not index_variable.strip()):
+            raise ValueError(f"{step_label}: index_variable must be a non-empty string")
+        child_step = step.get("step")
+        if not isinstance(child_step, dict):
+            raise ValueError(f"{step_label}: step is required for foreach steps")
+        validate_workflow_steps([child_step], foreach_depth=foreach_depth + 1, label_prefix=f"{step_label}.step")
+
+
+def validate_workflow_steps(
+    steps: list[dict[str, Any]],
+    foreach_depth: int = 0,
+    label_prefix: str = "Step",
+) -> list[dict[str, Any]]:
     for index, step in enumerate(steps):
-        step_label = f"Step {index + 1}"
-        step_id = step.get("id")
-        if not isinstance(step_id, str) or not step_id.strip():
-            raise ValueError(f"{step_label}: id is required")
-
-        step_type = step.get("type")
-        if not isinstance(step_type, str) or not step_type.strip():
-            raise ValueError(f"{step_label}: type is required")
-        if step_type not in ALLOWED_STEP_TYPES:
-            allowed = ", ".join(sorted(ALLOWED_STEP_TYPES))
-            raise ValueError(f"{step_label}: type must be one of: {allowed}")
-
-        if step_type == "llm":
-            if not step.get("prompt"):
-                raise ValueError(f"{step_label}: prompt is required for llm steps")
-            provider = step.get("provider")
-            if provider is not None and provider not in ALLOWED_LLM_PROVIDERS:
-                allowed = ", ".join(sorted(ALLOWED_LLM_PROVIDERS))
-                raise ValueError(f"{step_label}: provider must be one of: {allowed}")
-            temperature = step.get("temperature")
-            if temperature is not None and not 0 <= temperature <= 2:
-                raise ValueError(f"{step_label}: temperature must be between 0 and 2")
-            max_tokens = step.get("max_tokens")
-            if max_tokens is not None and max_tokens <= 0:
-                raise ValueError(f"{step_label}: max_tokens must be greater than 0")
-        elif step_type == "tool":
-            if not step.get("tool"):
-                raise ValueError(f"{step_label}: tool is required for tool steps")
-            if not step.get("action"):
-                raise ValueError(f"{step_label}: action is required for tool steps")
-        elif step_type == "approval":
-            if not (step.get("approver_email") or step.get("approver_email_template")):
-                raise ValueError(f"{step_label}: approver_email or approver_email_template is required for approval steps")
-        elif step_type == "condition":
-            if not step.get("condition"):
-                raise ValueError(f"{step_label}: condition is required for condition steps")
+        step_label = f"{label_prefix} {index + 1}" if label_prefix == "Step" else f"{label_prefix}[{index + 1}]"
+        _validate_step(step, step_label, foreach_depth)
 
     return steps
 
