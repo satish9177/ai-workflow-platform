@@ -28,6 +28,7 @@ class StepExecution(Base):
         ForeignKey("branch_executions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    parent_step_id: Mapped[str | None] = mapped_column(String, nullable=True)
     step_index: Mapped[int] = mapped_column(Integer, nullable=False)
     step_key: Mapped[str] = mapped_column(String, nullable=False)
     step_type: Mapped[str] = mapped_column(String, nullable=False)
@@ -53,3 +54,6 @@ class StepExecution(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+Index("ix_step_executions_run_parent_step", StepExecution.run_id, StepExecution.parent_step_id)

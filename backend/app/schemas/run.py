@@ -44,6 +44,7 @@ class StepExecutionRead(BaseModel):
     id: str
     run_id: str
     branch_execution_id: str | None
+    parent_step_id: str | None
     step_index: int
     step_key: str
     step_type: str
