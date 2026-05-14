@@ -4,7 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-ALLOWED_STEP_TYPES = {"llm", "tool", "approval", "condition", "parallel_group", "foreach"}
+ALLOWED_STEP_TYPES = {"llm", "tool", "approval", "condition", "parallel_group", "foreach", "switch"}
 ALLOWED_LLM_PROVIDERS = {"openai", "anthropic", "gemini", "mock"}
 
 
@@ -119,6 +119,57 @@ def _validate_step(step: dict[str, Any], step_label: str, foreach_depth: int, pa
             parallel_depth=parallel_depth,
             label_prefix=f"{step_label}.step",
         )
+    elif step_type == "switch":
+        if not step.get("on"):
+            raise ValueError(f"{step_label}: on is required for switch steps")
+        on_no_match = step.get("on_no_match", "skip")
+        if on_no_match not in {"skip", "fail"}:
+            raise ValueError(f"{step_label}: on_no_match must be skip or fail")
+
+        branches = step.get("branches")
+        if not isinstance(branches, dict) or not branches:
+            raise ValueError(f"{step_label}: branches are required for switch steps")
+        for branch_key, branch_steps in branches.items():
+            if not isinstance(branch_key, str) or not branch_key.strip():
+                raise ValueError(f"{step_label}: branch keys must be non-empty strings")
+            _validate_switch_branch_steps(
+                branch_steps,
+                foreach_depth=foreach_depth,
+                parallel_depth=parallel_depth,
+                label=f"{step_label}.branches[{branch_key}]",
+            )
+
+        if "default" in step:
+            _validate_switch_branch_steps(
+                step.get("default"),
+                foreach_depth=foreach_depth,
+                parallel_depth=parallel_depth,
+                label=f"{step_label}.default",
+            )
+
+
+def _validate_switch_branch_steps(
+    branch_steps: Any,
+    *,
+    foreach_depth: int,
+    parallel_depth: int,
+    label: str,
+) -> None:
+    if not isinstance(branch_steps, list) or not branch_steps:
+        raise ValueError(f"{label}: branch steps must be a non-empty list")
+    seen_ids: set[str] = set()
+    for child in branch_steps:
+        child_id = child.get("id") if isinstance(child, dict) else None
+        if child_id in seen_ids:
+            raise ValueError(f"{label}: step ids must be unique within a branch")
+        if isinstance(child_id, str):
+            seen_ids.add(child_id)
+    validate_workflow_steps(
+        branch_steps,
+        foreach_depth=foreach_depth,
+        parallel_depth=parallel_depth,
+        label_prefix=label,
+    )
 
 
 def validate_workflow_steps(

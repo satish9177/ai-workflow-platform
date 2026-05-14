@@ -150,6 +150,7 @@ async def _start_step_execution(
     step_type: str,
     input_preview: dict[str, Any] | None = None,
     branch_execution_id: str | None = None,
+    parent_step_id: str | None = None,
     branch_key: str | None = None,
     foreach_index: int | None = None,
     foreach_item: Any | None = None,
@@ -173,6 +174,7 @@ async def _start_step_execution(
             step_type=step_type,
             step_label=_step_label(step, step_id),
             branch_execution_id=branch_execution_id,
+            parent_step_id=parent_step_id,
             branch_key=branch_key,
             foreach_index=foreach_index,
             foreach_item=foreach_item,
@@ -207,6 +209,7 @@ async def _start_step_execution(
         step_execution.step_type = step_type
         step_execution.step_label = _step_label(step, step_id)
         step_execution.branch_execution_id = branch_execution_id
+        step_execution.parent_step_id = parent_step_id
         step_execution.branch_key = branch_key
         step_execution.foreach_index = foreach_index
         step_execution.foreach_item = foreach_item
@@ -300,6 +303,16 @@ def _build_input_preview(step: dict[str, Any], context: dict[str, Any], step_typ
 
         if step_type == "condition":
             return sanitize_preview_payload(render_template_object(step, context))
+
+        if step_type == "switch":
+            return sanitize_preview_payload(
+                {
+                    "on": render_template_object(step.get("on", ""), context),
+                    "on_no_match": step.get("on_no_match", "skip"),
+                    "branches": list((step.get("branches") or {}).keys()),
+                    "has_default": bool(step.get("default")),
+                }
+            )
     except Exception as exc:
         return {"preview_error": str(exc)}
 
@@ -319,6 +332,8 @@ def _build_output_preview(step_type: str, output: dict[str, Any]) -> dict[str, A
     if step_type == "tool":
         return sanitize_preview_payload({"response": output})
     if step_type == "condition":
+        return sanitize_preview_payload(output)
+    if step_type == "switch":
         return sanitize_preview_payload(output)
     return sanitize_preview_payload(output)
 
@@ -378,6 +393,8 @@ async def _dispatch_step(
         return await run_llm_step(step, context, run_id, db)
     if step_type == "approval":
         return await run_approval_step(step, context, run_id, db)
+    if step_type == "switch":
+        return await _execute_switch_step(step, context, run_id, db)
     if step_type == "parallel_group":
         raise ValueError("Nested parallel_group execution is not supported yet")
     if step_type == "foreach":
@@ -426,6 +443,421 @@ async def _execute_step_with_retry(
             await asyncio.sleep(backoff_seconds)
 
     raise RuntimeError("Retry execution ended unexpectedly")
+
+
+def _switch_branch_step(switch_step_key: str, branch_key: str, step: dict[str, Any]) -> dict[str, Any]:
+    child_id = step.get("id")
+    if not child_id:
+        raise ValueError("Invalid switch branch step: missing id")
+    return {**step, "id": f"{switch_step_key}.{branch_key}.{child_id}"}
+
+
+def _switch_selection_from_output(output: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(output, dict):
+        return None
+    if "selected_branch" not in output or "evaluated_value" not in output:
+        return None
+    return {
+        "evaluated_value": output.get("evaluated_value"),
+        "selected_branch": output.get("selected_branch"),
+        "matched": bool(output.get("matched")),
+        "used_default": bool(output.get("used_default")),
+    }
+
+
+async def _get_switch_selection(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    switch_step_id: str,
+    step_execution: StepExecution | None,
+) -> dict[str, Any] | None:
+    if step_execution is not None:
+        selection = _switch_selection_from_output(step_execution.output_preview)
+        if selection is not None:
+            return selection
+    step_result = await _get_existing_step(db, run_id, switch_step_id)
+    return _switch_selection_from_output(step_result.output if step_result is not None else None)
+
+
+async def _upsert_switch_branch_execution(
+    db: AsyncSession,
+    *,
+    run_id: str,
+    switch_step_id: str,
+    branch_step_id: str,
+    branch_key: str,
+    status: str,
+    step_index: int,
+    output_preview: dict[str, Any] | None = None,
+    error: Exception | str | None = None,
+    branch_execution_id: str | None = None,
+    parent_step_id: str | None = None,
+    branch_group_key: str | None = None,
+    foreach_index: int | None = None,
+    foreach_item: Any | None = None,
+) -> StepExecution:
+    existing = await _get_existing_step_execution(db, run_id, branch_step_id)
+    now = datetime.now(timezone.utc)
+    if existing is None:
+        existing = StepExecution(
+            run_id=run_id,
+            branch_execution_id=branch_execution_id,
+            parent_step_id=parent_step_id or switch_step_id,
+            step_index=step_index,
+            step_key=branch_step_id,
+            step_type="switch_branch",
+            step_label=branch_key,
+            branch_key=branch_group_key or branch_key,
+            foreach_index=foreach_index,
+            foreach_item=foreach_item,
+            status=status,
+            attempt_number=1,
+            max_attempts=1,
+            started_at=now if status != "skipped" else None,
+            completed_at=now if status in TERMINAL_BRANCH_STATUSES or status == "skipped" else None,
+            duration_ms=0 if status in TERMINAL_BRANCH_STATUSES or status == "skipped" else None,
+            output_preview=output_preview,
+            error_details=_error_details(error),
+        )
+        db.add(existing)
+        await db.flush()
+        return existing
+
+    existing.parent_step_id = parent_step_id or switch_step_id
+    existing.branch_execution_id = branch_execution_id
+    existing.branch_key = branch_group_key or branch_key
+    existing.foreach_index = foreach_index
+    existing.foreach_item = foreach_item
+    existing.step_index = step_index
+    existing.status = status
+    if status == "running":
+        existing.started_at = existing.started_at or now
+        existing.completed_at = None
+        existing.duration_ms = None
+        existing.error_details = None
+    elif status in TERMINAL_BRANCH_STATUSES or status == "skipped":
+        existing.completed_at = now
+        existing.duration_ms = _duration_ms(existing.started_at, now)
+        existing.error_details = _error_details(error)
+    if output_preview is not None:
+        existing.output_preview = output_preview
+    await db.flush()
+    return existing
+
+
+async def _execute_inline_steps(
+    steps: list[dict[str, Any]],
+    context: dict[str, Any],
+    run_id: str,
+    db: AsyncSession,
+    *,
+    base_step_index: int,
+    parent_step_id: str,
+    branch_execution_id: str | None = None,
+    branch_key: str | None = None,
+    foreach_index: int | None = None,
+    foreach_item: Any | None = None,
+) -> dict[str, Any]:
+    outputs: dict[str, Any] = {}
+    for child_offset, child_step in enumerate(steps):
+        child_step_id, child_step_type = _validate_step_for_execution(child_step)
+        existing = await _get_existing_step(db, run_id, child_step_id)
+        if existing is not None and existing.status == "completed":
+            if existing.output is not None:
+                context[child_step_id] = existing.output
+                outputs[child_step_id] = existing.output
+                if child_step.get("output_as"):
+                    context[str(child_step["output_as"])] = existing.output
+            continue
+
+        logger.info(
+            "step.started",
+            run_id=run_id,
+            step_id=child_step_id,
+            step_type=child_step_type,
+            parent_step_id=parent_step_id,
+        )
+        await _upsert_step(db, run_id, child_step_id, child_step_type, "running", input=child_step)
+        input_preview = _build_input_preview(child_step, context, child_step_type)
+        child_execution = await _start_step_execution(
+            db,
+            run_id,
+            base_step_index + child_offset,
+            child_step,
+            child_step_id,
+            child_step_type,
+            input_preview=input_preview,
+            branch_execution_id=branch_execution_id,
+            parent_step_id=parent_step_id,
+            branch_key=branch_key,
+            foreach_index=foreach_index,
+            foreach_item=foreach_item,
+        )
+        await db.commit()
+
+        try:
+            attempt_number = 1
+            if child_step_type in {"tool", "llm"}:
+                output, attempt_number = await _execute_step_with_retry(child_step, context, run_id, db)
+            else:
+                output = await _dispatch_step(child_step, context, run_id, db)
+        except ApprovalRequiredException:
+            await _finish_step_execution(
+                db,
+                child_execution,
+                "awaiting_approval",
+                attempt_number=1,
+                output_preview={"approval_required": True},
+            )
+            await _upsert_step(db, run_id, child_step_id, child_step_type, "paused", input=child_step)
+            await db.commit()
+            raise
+        except Exception as exc:
+            await _finish_step_execution(
+                db,
+                child_execution,
+                "failed",
+                attempt_number=getattr(exc, "attempt_number", _max_attempts_for_step(child_step, child_step_type)),
+                error=exc,
+            )
+            await _upsert_step(
+                db,
+                run_id,
+                child_step_id,
+                child_step_type,
+                "failed",
+                input=child_step,
+                error=_step_error_message(exc),
+            )
+            await db.commit()
+            logger.exception(
+                "step.failed",
+                run_id=run_id,
+                step_id=child_step_id,
+                step_type=child_step_type,
+                parent_step_id=parent_step_id,
+                error=str(exc),
+            )
+            raise
+
+        normalized_output = output if isinstance(output, dict) else {"result": output}
+        context[child_step_id] = normalized_output
+        outputs[child_step_id] = normalized_output
+        if child_step.get("output_as"):
+            context[str(child_step["output_as"])] = normalized_output
+        await _upsert_step(
+            db,
+            run_id,
+            child_step_id,
+            child_step_type,
+            "completed",
+            input=child_step,
+            output=normalized_output,
+        )
+        await _finish_step_execution(
+            db,
+            child_execution,
+            "completed",
+            attempt_number=attempt_number,
+            output_preview=_build_output_preview(child_step_type, normalized_output),
+        )
+        await db.commit()
+        logger.info(
+            "step.completed",
+            run_id=run_id,
+            step_id=child_step_id,
+            step_type=child_step_type,
+            parent_step_id=parent_step_id,
+        )
+    return outputs
+
+
+async def _execute_switch_step(
+    step: dict[str, Any],
+    context: dict[str, Any],
+    run_id: str,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    switch_step_id = str(step["id"])
+    logger.info("switch.started", run_id=run_id, step_id=switch_step_id)
+    switch_execution = await _get_existing_step_execution(db, run_id, switch_step_id)
+    selection = await _get_switch_selection(
+        db,
+        run_id=run_id,
+        switch_step_id=switch_step_id,
+        step_execution=switch_execution,
+    )
+
+    branches: dict[str, list[dict[str, Any]]] = step.get("branches") or {}
+    used_default = False
+    matched = False
+    if selection is None:
+        evaluated = render_template_object(step.get("on", ""), context)
+        evaluated_value = "" if evaluated is None else str(evaluated)
+        if evaluated_value in branches:
+            selected_branch = evaluated_value
+            selected_steps = branches[selected_branch]
+            matched = True
+        elif step.get("default") is not None:
+            selected_branch = "default"
+            selected_steps = step.get("default") or []
+            used_default = True
+        else:
+            selected_branch = None
+            selected_steps = []
+
+        selection = {
+            "evaluated_value": evaluated_value,
+            "selected_branch": selected_branch,
+            "matched": matched,
+            "used_default": used_default,
+        }
+        if switch_execution is not None:
+            switch_execution.output_preview = sanitize_preview_payload(selection)
+            await db.flush()
+        await _upsert_step(db, run_id, switch_step_id, "switch", "running", input=step, output=selection)
+        await db.commit()
+    else:
+        selected_branch = selection["selected_branch"]
+        evaluated_value = str(selection["evaluated_value"])
+        matched = bool(selection["matched"])
+        used_default = bool(selection["used_default"])
+        selected_steps = (step.get("default") or []) if selected_branch == "default" else branches.get(str(selected_branch), [])
+
+    context[f"{switch_step_id}.__branch__"] = selection["selected_branch"]
+    context[f"{switch_step_id}.__evaluated__"] = selection["evaluated_value"]
+
+    all_branch_keys = list(branches.keys())
+    if step.get("default") is not None:
+        all_branch_keys.append("default")
+
+    parent_index = switch_execution.step_index if switch_execution is not None else 0
+    for branch_offset, branch_key_name in enumerate(all_branch_keys):
+        branch_step_id = f"{switch_step_id}.{branch_key_name}"
+        branch_status = "running" if branch_key_name == selection["selected_branch"] else "skipped"
+        branch_preview = {
+            "selected": branch_key_name == selection["selected_branch"],
+            "evaluated_value": selection["evaluated_value"],
+            "selected_branch": selection["selected_branch"],
+            "matched": matched,
+            "used_default": used_default,
+        }
+        await _upsert_switch_branch_execution(
+            db,
+            run_id=run_id,
+            switch_step_id=switch_step_id,
+            branch_step_id=branch_step_id,
+            branch_key=branch_key_name,
+            status=branch_status,
+            step_index=(parent_index + 1) * 1000 + branch_offset,
+            output_preview=sanitize_preview_payload(branch_preview),
+            branch_execution_id=switch_execution.branch_execution_id if switch_execution is not None else None,
+            parent_step_id=switch_step_id,
+            branch_group_key=switch_execution.branch_key if switch_execution is not None else None,
+            foreach_index=switch_execution.foreach_index if switch_execution is not None else None,
+            foreach_item=switch_execution.foreach_item if switch_execution is not None else None,
+        )
+    await db.commit()
+
+    if selection["selected_branch"] is None:
+        if step.get("on_no_match", "skip") == "fail":
+            logger.warning(
+                "switch.no_match_failed",
+                run_id=run_id,
+                step_id=switch_step_id,
+                evaluated_value=selection["evaluated_value"],
+            )
+            raise ValueError(f"Switch step {switch_step_id} did not match branch: {selection['evaluated_value']}")
+        logger.info(
+            "switch.no_match_skipped",
+            run_id=run_id,
+            step_id=switch_step_id,
+            evaluated_value=selection["evaluated_value"],
+        )
+        return {**selection, "outputs": {}}
+
+    logger.info(
+        "switch.branch_selected",
+        run_id=run_id,
+        step_id=switch_step_id,
+        evaluated_value=evaluated_value,
+        selected_branch=selection["selected_branch"],
+        matched=matched,
+        used_default=used_default,
+    )
+    selected_branch_id = f"{switch_step_id}.{selection['selected_branch']}"
+    try:
+        outputs = await _execute_inline_steps(
+            [_switch_branch_step(switch_step_id, str(selection["selected_branch"]), child) for child in selected_steps],
+            context,
+            run_id,
+            db,
+            base_step_index=(parent_index + 1) * 1000,
+            parent_step_id=switch_step_id,
+            branch_execution_id=switch_execution.branch_execution_id if switch_execution is not None else None,
+            branch_key=switch_execution.branch_key if switch_execution is not None else None,
+            foreach_index=switch_execution.foreach_index if switch_execution is not None else None,
+            foreach_item=switch_execution.foreach_item if switch_execution is not None else None,
+        )
+    except ApprovalRequiredException:
+        await _upsert_switch_branch_execution(
+            db,
+            run_id=run_id,
+            switch_step_id=switch_step_id,
+            branch_step_id=selected_branch_id,
+            branch_key=str(selection["selected_branch"]),
+            status="awaiting_approval",
+            step_index=(parent_index + 1) * 1000,
+            output_preview=sanitize_preview_payload({**selection, "approval_required": True}),
+            branch_execution_id=switch_execution.branch_execution_id if switch_execution is not None else None,
+            parent_step_id=switch_step_id,
+            branch_group_key=switch_execution.branch_key if switch_execution is not None else None,
+            foreach_index=switch_execution.foreach_index if switch_execution is not None else None,
+            foreach_item=switch_execution.foreach_item if switch_execution is not None else None,
+        )
+        raise
+    except Exception:
+        logger.exception("switch.failed", run_id=run_id, step_id=switch_step_id)
+        await _upsert_switch_branch_execution(
+            db,
+            run_id=run_id,
+            switch_step_id=switch_step_id,
+            branch_step_id=selected_branch_id,
+            branch_key=str(selection["selected_branch"]),
+            status="failed",
+            step_index=(parent_index + 1) * 1000,
+            output_preview=sanitize_preview_payload(selection),
+            branch_execution_id=switch_execution.branch_execution_id if switch_execution is not None else None,
+            parent_step_id=switch_step_id,
+            branch_group_key=switch_execution.branch_key if switch_execution is not None else None,
+            foreach_index=switch_execution.foreach_index if switch_execution is not None else None,
+            foreach_item=switch_execution.foreach_item if switch_execution is not None else None,
+        )
+        raise
+
+    await _upsert_switch_branch_execution(
+        db,
+        run_id=run_id,
+        switch_step_id=switch_step_id,
+        branch_step_id=selected_branch_id,
+        branch_key=str(selection["selected_branch"]),
+        status="completed",
+        step_index=(parent_index + 1) * 1000,
+        output_preview=sanitize_preview_payload({**selection, "outputs": outputs}),
+        branch_execution_id=switch_execution.branch_execution_id if switch_execution is not None else None,
+        parent_step_id=switch_step_id,
+        branch_group_key=switch_execution.branch_key if switch_execution is not None else None,
+        foreach_index=switch_execution.foreach_index if switch_execution is not None else None,
+        foreach_item=switch_execution.foreach_item if switch_execution is not None else None,
+    )
+    logger.info(
+        "switch.completed",
+        run_id=run_id,
+        step_id=switch_step_id,
+        selected_branch=selection["selected_branch"],
+    )
+    return {**selection, "outputs": outputs}
 
 
 async def _enqueue_parallel_branch(
@@ -1089,9 +1521,19 @@ async def _resume_parallel_branch_approval(
     if branch_execution is None or branch_execution.branch_type != "parallel_group":
         return False
 
+    run = await db.get(Run, run_id)
+    workflow = await db.get(Workflow, run.workflow_id) if run is not None else None
+    if approved and workflow is not None and _is_nested_parallel_step(branch_execution, step_id):
+        branch_execution.status = "running"
+        if run is not None:
+            run.status = "running"
+        await db.commit()
+        branch_index = _parallel_branch_index_for_step(workflow, branch_execution.step_key, step_id)
+        await execute_parallel_branch(branch_execution.id, run_id, branch_execution.step_key, branch_index, db)
+        return True
+
     branch_status = "completed" if approved else "failed"
     await _mark_branch_terminal(db, branch_execution.id, branch_status)
-    run = await db.get(Run, run_id)
     if run is not None and approved:
         run.status = "running"
     await db.commit()
@@ -1113,6 +1555,30 @@ def _foreach_iteration_step(foreach_step_key: str, step: dict[str, Any], item_in
     branch_key = str(item_index)
     dotted_key = f"{foreach_step_key}.{item_index}.{child_id}"
     return branch_key, {**step, "id": dotted_key}
+
+
+def _is_nested_parallel_step(branch_execution: BranchExecution, step_id: str) -> bool:
+    prefix = f"{branch_execution.step_key}."
+    if not step_id.startswith(prefix):
+        return False
+    return "." in step_id[len(prefix) :]
+
+
+def _parallel_branch_index_for_step(workflow: Workflow, group_step_key: str, step_id: str) -> int:
+    _group_step_index, group_step = _find_parallel_group(workflow, group_step_key)
+    remainder = step_id[len(f"{group_step_key}.") :]
+    top_child_id = remainder.split(".", 1)[0]
+    for index, child_step in enumerate(group_step.get("steps") or []):
+        if child_step.get("id") == top_child_id:
+            return index
+    raise ValueError(f"Parallel branch child not found for step: {step_id}")
+
+
+def _is_nested_foreach_step(branch_execution: BranchExecution, step_id: str, foreach_index: int) -> bool:
+    prefix = f"{branch_execution.step_key}.{foreach_index}."
+    if not step_id.startswith(prefix):
+        return False
+    return "." in step_id[len(prefix) :]
 
 
 async def _foreach_started_indices(db: AsyncSession, branch_execution_id: str) -> set[int]:
@@ -1444,13 +1910,21 @@ async def _resume_foreach_iteration_approval(
     ):
         return False
 
+    run = await db.get(Run, run_id)
+    workflow = await db.get(Workflow, run.workflow_id) if run is not None else None
+    if approved and workflow is not None and _is_nested_foreach_step(branch_execution, step_id, step_execution.foreach_index):
+        branch_execution.status = "running"
+        if run is not None:
+            run.status = "running"
+        await db.commit()
+        await execute_foreach_iteration(branch_execution.id, run_id, branch_execution.step_key, step_execution.foreach_index, db)
+        return True
+
     updated = await _sync_foreach_branch_counters(db, branch_execution.id)
     if updated is None:
         await _merge_foreach_if_ready(db, branch_execution.id, run_id, branch_execution.step_key)
         return True
 
-    run = await db.get(Run, run_id)
-    workflow = await db.get(Workflow, run.workflow_id) if run is not None else None
     if run is not None and approved:
         run.status = "running"
 
