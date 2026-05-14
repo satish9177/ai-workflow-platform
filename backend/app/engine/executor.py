@@ -1,8 +1,11 @@
 import asyncio
+import inspect
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from arq import create_pool
+from arq.connections import RedisSettings
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
@@ -12,6 +15,7 @@ from app.engine.steps.condition import run_condition_step
 from app.engine.steps.llm import run_llm_step
 from app.engine.steps.tool import run_tool_step
 from app.llm.provider_errors import ProviderExecutionError, normalize_provider_error
+from app.models.branch_execution import BranchExecution
 from app.models.run import Run
 from app.models.step_execution import StepExecution
 from app.models.step_result import StepResult
@@ -22,6 +26,7 @@ from app.utils.template_renderer import render_template_object
 
 
 logger = structlog.get_logger(__name__)
+TERMINAL_BRANCH_STATUSES = {"completed", "failed", "cancelled"}
 
 
 async def _get_existing_step(db: AsyncSession, run_id: str, step_id: str) -> StepResult | None:
@@ -80,6 +85,16 @@ async def _get_existing_step_execution(
     return result.scalar_one_or_none()
 
 
+async def _get_branch_execution(db: AsyncSession, run_id: str, step_key: str) -> BranchExecution | None:
+    result = await db.execute(
+        select(BranchExecution).where(
+            BranchExecution.run_id == run_id,
+            BranchExecution.step_key == step_key,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 def _step_label(step: dict[str, Any], step_id: str) -> str:
     return str(step.get("label") or step.get("name") or step_id)
 
@@ -105,6 +120,8 @@ async def _start_step_execution(
     step_id: str,
     step_type: str,
     input_preview: dict[str, Any] | None = None,
+    branch_execution_id: str | None = None,
+    branch_key: str | None = None,
 ) -> StepExecution:
     now = datetime.now(timezone.utc)
     step_execution = await _get_existing_step_execution(db, run_id, step_id)
@@ -115,6 +132,8 @@ async def _start_step_execution(
             step_key=step_id,
             step_type=step_type,
             step_label=_step_label(step, step_id),
+            branch_execution_id=branch_execution_id,
+            branch_key=branch_key,
             status="running",
             attempt_number=1,
             max_attempts=_max_attempts_for_step(step, step_type),
@@ -129,6 +148,8 @@ async def _start_step_execution(
         step_execution.step_index = step_index
         step_execution.step_type = step_type
         step_execution.step_label = _step_label(step, step_id)
+        step_execution.branch_execution_id = branch_execution_id
+        step_execution.branch_key = branch_key
         step_execution.status = "running"
         step_execution.attempt_number = 1
         step_execution.max_attempts = _max_attempts_for_step(step, step_type)
@@ -240,6 +261,10 @@ def _build_output_preview(step_type: str, output: dict[str, Any]) -> dict[str, A
     return sanitize_preview_payload(output)
 
 
+def _build_parallel_group_output_preview(output: dict[str, Any]) -> dict[str, Any]:
+    return sanitize_preview_payload(output)
+
+
 def _step_type(step: dict[str, Any]) -> str:
     return step.get("type") or step.get("step_type") or ""
 
@@ -291,6 +316,10 @@ async def _dispatch_step(
         return await run_llm_step(step, context, run_id, db)
     if step_type == "approval":
         return await run_approval_step(step, context, run_id, db)
+    if step_type == "parallel_group":
+        raise ValueError("Nested parallel_group execution is not supported yet")
+    if step_type == "foreach":
+        raise ValueError("foreach execution is not supported yet")
     if step_type == "tool" or ToolRegistry.get(step_type) is not None:
         return await run_tool_step(step, context, db, run_id=run_id)
     raise ValueError(f"Unsupported step type: {step_type}")
@@ -335,6 +364,388 @@ async def _execute_step_with_retry(
             await asyncio.sleep(backoff_seconds)
 
     raise RuntimeError("Retry execution ended unexpectedly")
+
+
+async def _enqueue_parallel_branch(
+    branch_execution_id: str,
+    run_id: str,
+    group_step_key: str,
+    branch_index: int,
+) -> None:
+    pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    try:
+        await pool.enqueue_job("execute_parallel_branch_job", branch_execution_id, run_id, group_step_key, branch_index)
+    finally:
+        close = getattr(pool, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+class ParallelGroupPending(Exception):
+    pass
+
+
+class ParallelGroupExecutor:
+    async def start(
+        self,
+        *,
+        run: Run,
+        workflow: Workflow,
+        step: dict[str, Any],
+        step_index: int,
+        context: dict[str, Any],
+        db: AsyncSession,
+    ) -> BranchExecution:
+        group_key = str(step["id"])
+        existing = await _get_branch_execution(db, run.id, group_key)
+        if existing is not None:
+            logger.info(
+                "parallel_group.already_started",
+                run_id=run.id,
+                workflow_id=workflow.id,
+                step_key=group_key,
+                branch_execution_id=existing.id,
+                status=existing.status,
+            )
+            return existing
+
+        child_steps = step.get("steps") or []
+        branch_execution = BranchExecution(
+            run_id=run.id,
+            step_key=group_key,
+            branch_type="parallel_group",
+            status="running",
+            total_branches=len(child_steps),
+            completed_branches=0,
+            failed_branches=0,
+            cancelled_branches=0,
+            merge_triggered=False,
+            fail_fast=bool(step.get("fail_fast", False)),
+            fail_fast_triggered=False,
+            merged_context=None,
+            started_at=datetime.now(timezone.utc),
+        )
+        db.add(branch_execution)
+        run.context = context
+        run.status = "running"
+        run.current_step = group_key
+        await db.commit()
+        await db.refresh(branch_execution)
+
+        logger.info(
+            "parallel_group.started",
+            run_id=run.id,
+            workflow_id=workflow.id,
+            step_key=group_key,
+            branch_execution_id=branch_execution.id,
+            total_branches=branch_execution.total_branches,
+        )
+        for branch_index, _child_step in enumerate(child_steps):
+            await _enqueue_parallel_branch(branch_execution.id, run.id, group_key, branch_index)
+
+        return branch_execution
+
+
+def _find_parallel_group(workflow: Workflow, group_step_key: str) -> tuple[int, dict[str, Any]]:
+    for index, step in enumerate(workflow.steps):
+        if step.get("id") == group_step_key and step.get("type") == "parallel_group":
+            return index, step
+    raise ValueError(f"Parallel group not found: {group_step_key}")
+
+
+def _branch_step(group_step_key: str, step: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    child_id = step.get("id")
+    if not child_id:
+        raise ValueError("Invalid parallel branch step: missing id")
+    branch_key = str(child_id)
+    dotted_key = f"{group_step_key}.{branch_key}"
+    return branch_key, {**step, "id": dotted_key}
+
+
+async def _mark_branch_terminal(
+    db: AsyncSession,
+    branch_execution_id: str,
+    status: str,
+) -> BranchExecution | None:
+    values: dict[str, Any] = {}
+    if status == "completed":
+        values["completed_branches"] = BranchExecution.completed_branches + 1
+    elif status == "failed":
+        values["failed_branches"] = BranchExecution.failed_branches + 1
+    elif status == "cancelled":
+        values["cancelled_branches"] = BranchExecution.cancelled_branches + 1
+    else:
+        raise ValueError(f"Unsupported branch terminal status: {status}")
+
+    result = await db.execute(
+        update(BranchExecution)
+        .where(BranchExecution.id == branch_execution_id, BranchExecution.merge_triggered.is_(False))
+        .values(**values)
+        .returning(BranchExecution)
+    )
+    return result.scalar_one_or_none()
+
+
+def _all_branches_terminal(branch_execution: BranchExecution) -> bool:
+    terminal_count = (
+        branch_execution.completed_branches
+        + branch_execution.failed_branches
+        + branch_execution.cancelled_branches
+    )
+    return terminal_count >= branch_execution.total_branches
+
+
+async def _claim_merge(db: AsyncSession, branch_execution_id: str) -> BranchExecution | None:
+    result = await db.execute(
+        update(BranchExecution)
+        .where(BranchExecution.id == branch_execution_id, BranchExecution.merge_triggered.is_(False))
+        .values(merge_triggered=True)
+        .returning(BranchExecution)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _synthesize_parallel_group_output(
+    db: AsyncSession,
+    run_id: str,
+    group_step: dict[str, Any],
+) -> dict[str, Any]:
+    branches: dict[str, Any] = {}
+    for child_step in group_step.get("steps") or []:
+        branch_key = str(child_step["id"])
+        dotted_key = f"{group_step['id']}.{branch_key}"
+        step_result = await _get_existing_step(db, run_id, dotted_key)
+        if step_result is None:
+            branches[branch_key] = {"status": "missing"}
+        elif step_result.status == "completed":
+            branches[branch_key] = step_result.output
+        else:
+            branches[branch_key] = {"status": step_result.status, "error": step_result.error}
+    return {"branches": branches}
+
+
+async def _merge_parallel_group_if_ready(
+    db: AsyncSession,
+    branch_execution_id: str,
+    run_id: str,
+    group_step_key: str,
+) -> None:
+    branch_execution = await db.get(BranchExecution, branch_execution_id)
+    if branch_execution is None or not _all_branches_terminal(branch_execution):
+        await db.commit()
+        return
+
+    claimed = await _claim_merge(db, branch_execution_id)
+    if claimed is None:
+        await db.commit()
+        return
+
+    run = await db.get(Run, run_id)
+    if run is None:
+        await db.commit()
+        return
+    workflow = await db.get(Workflow, run.workflow_id)
+    if workflow is None:
+        run.status = "failed"
+        run.error = "Workflow not found"
+        await db.commit()
+        return
+
+    group_step_index, group_step = _find_parallel_group(workflow, group_step_key)
+    merged_output = await _synthesize_parallel_group_output(db, run_id, group_step)
+    now = datetime.now(timezone.utc)
+    branch_execution = await db.get(BranchExecution, branch_execution_id)
+    if branch_execution is None:
+        await db.commit()
+        return
+    branch_execution.completed_at = now
+    branch_execution.merged_context = merged_output
+
+    group_step_execution = await _get_existing_step_execution(db, run_id, group_step_key)
+    if branch_execution.failed_branches or branch_execution.cancelled_branches:
+        branch_execution.status = "failed"
+        await _upsert_step(
+            db,
+            run_id,
+            group_step_key,
+            "parallel_group",
+            "failed",
+            input=group_step,
+            output=merged_output,
+            error="One or more parallel branches failed",
+        )
+        if group_step_execution is not None:
+            await _finish_step_execution(
+                db,
+                group_step_execution,
+                "failed",
+                error="One or more parallel branches failed",
+                output_preview=_build_parallel_group_output_preview(merged_output),
+            )
+        run.status = "failed"
+        run.error = "One or more parallel branches failed"
+        run.context = {**(run.context or {}), group_step_key: merged_output}
+        await db.commit()
+        logger.warning(
+            "parallel_group.failed",
+            run_id=run_id,
+            workflow_id=workflow.id,
+            step_key=group_step_key,
+            branch_execution_id=branch_execution_id,
+        )
+        return
+
+    branch_execution.status = "completed"
+    context = dict(run.context or {})
+    context[group_step_key] = merged_output
+    if group_step.get("output_as"):
+        context[str(group_step["output_as"])] = merged_output
+    run.context = context
+    await _upsert_step(
+        db,
+        run_id,
+        group_step_key,
+        "parallel_group",
+        "completed",
+        input=group_step,
+        output=merged_output,
+    )
+    if group_step_execution is not None:
+        await _finish_step_execution(
+            db,
+            group_step_execution,
+            "completed",
+            output_preview=_build_parallel_group_output_preview(merged_output),
+        )
+    await db.commit()
+    logger.info(
+        "parallel_group.completed",
+        run_id=run_id,
+        workflow_id=workflow.id,
+        step_key=group_step_key,
+        branch_execution_id=branch_execution_id,
+    )
+    await execute_run(run_id, db)
+
+
+async def execute_parallel_branch(
+    branch_execution_id: str,
+    run_id: str,
+    group_step_key: str,
+    branch_index: int,
+    db: AsyncSession,
+) -> None:
+    run = await db.get(Run, run_id)
+    if run is None:
+        logger.warning("parallel_branch.run_not_found", run_id=run_id, branch_execution_id=branch_execution_id)
+        return
+    workflow = await db.get(Workflow, run.workflow_id)
+    if workflow is None:
+        logger.warning("parallel_branch.workflow_not_found", run_id=run_id, workflow_id=run.workflow_id)
+        return
+
+    group_step_index, group_step = _find_parallel_group(workflow, group_step_key)
+    child_steps = group_step.get("steps") or []
+    if branch_index >= len(child_steps):
+        raise ValueError(f"Parallel branch index out of range: {branch_index}")
+    branch_key, child_step = _branch_step(group_step_key, child_steps[branch_index])
+    step_id, step_type = _validate_step_for_execution(child_step)
+    if step_type in {"parallel_group", "foreach"}:
+        raise ValueError(f"Nested orchestration step is not supported in parallel_group: {step_type}")
+
+    existing = await _get_existing_step(db, run_id, step_id)
+    if existing is not None and existing.status in TERMINAL_BRANCH_STATUSES:
+        await _merge_parallel_group_if_ready(db, branch_execution_id, run_id, group_step_key)
+        return
+
+    context: dict[str, Any] = dict(run.context or {})
+    if run.trigger_data:
+        context.setdefault("trigger_data", run.trigger_data)
+
+    step_index = (group_step_index + 1) * 1000 + branch_index
+    input_preview = _build_input_preview(child_step, context, step_type)
+    step_execution = await _start_step_execution(
+        db,
+        run_id,
+        step_index,
+        child_step,
+        step_id,
+        step_type,
+        input_preview=input_preview,
+        branch_execution_id=branch_execution_id,
+        branch_key=branch_key,
+    )
+    await _upsert_step(db, run_id, step_id, step_type, "running", input=child_step)
+    await db.commit()
+
+    branch_status = "completed"
+    try:
+        attempt_number = 1
+        if step_type in {"tool", "llm"}:
+            output, attempt_number = await _execute_step_with_retry(child_step, context, run_id, db)
+        else:
+            output = await _dispatch_step(child_step, context, run_id, db)
+
+        normalized_output = output if isinstance(output, dict) else {"result": output}
+        context[step_id] = normalized_output
+        if child_step.get("output_as"):
+            context[str(child_step["output_as"])] = normalized_output
+        await _upsert_step(
+            db,
+            run_id,
+            step_id,
+            step_type,
+            "completed",
+            input=child_step,
+            output=normalized_output,
+        )
+        await _finish_step_execution(
+            db,
+            step_execution,
+            "completed",
+            attempt_number=attempt_number,
+            output_preview=_build_output_preview(step_type, normalized_output),
+        )
+        logger.info(
+            "parallel_branch.completed",
+            run_id=run_id,
+            workflow_id=workflow.id,
+            group_step_key=group_step_key,
+            branch_key=branch_key,
+            step_key=step_id,
+        )
+    except Exception as exc:
+        branch_status = "failed"
+        await _finish_step_execution(
+            db,
+            step_execution,
+            "failed",
+            attempt_number=getattr(exc, "attempt_number", _max_attempts_for_step(child_step, step_type)),
+            error=exc,
+        )
+        await _upsert_step(
+            db,
+            run_id,
+            step_id,
+            step_type,
+            "failed",
+            input=child_step,
+            error=_step_error_message(exc),
+        )
+        logger.exception(
+            "parallel_branch.failed",
+            run_id=run_id,
+            workflow_id=workflow.id,
+            group_step_key=group_step_key,
+            branch_key=branch_key,
+            step_key=step_id,
+            error=str(exc),
+        )
+
+    await _mark_branch_terminal(db, branch_execution_id, branch_status)
+    await _merge_parallel_group_if_ready(db, branch_execution_id, run_id, group_step_key)
 
 
 async def execute_run(run_id: str, db: AsyncSession) -> None:
@@ -395,10 +806,28 @@ async def execute_run(run_id: str, db: AsyncSession) -> None:
 
             try:
                 attempt_number = 1
+                if step_type == "parallel_group":
+                    await ParallelGroupExecutor().start(
+                        run=run,
+                        workflow=workflow,
+                        step=step,
+                        step_index=step_index,
+                        context=context,
+                        db=db,
+                    )
+                    raise ParallelGroupPending()
                 if step_type in {"tool", "llm"}:
                     output, attempt_number = await _execute_step_with_retry(step, context, run_id, db)
                 else:
                     output = await _dispatch_step(step, context, run_id, db)
+            except ParallelGroupPending:
+                logger.info(
+                    "run.waiting_for_parallel_group",
+                    run_id=run_id,
+                    workflow_id=workflow.id,
+                    step_id=step_id,
+                )
+                return
             except ApprovalRequiredException:
                 await _finish_step_execution(
                     db,

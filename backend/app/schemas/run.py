@@ -67,7 +67,30 @@ class StepExecutionRead(BaseModel):
     updated_at: datetime
 
 
+class BranchExecutionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    step_key: str
+    branch_type: str
+    status: str
+    total_branches: int
+    completed_branches: int
+    failed_branches: int
+    cancelled_branches: int
+    merge_triggered: bool
+    fail_fast: bool
+    fail_fast_triggered: bool
+    foreach_items: list[Any] | None
+    merged_context: dict[str, Any] | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+
+
 class RunTimelineRead(BaseModel):
     run: RunRead
     steps: list[StepExecutionRead]
+    branches: list[BranchExecutionRead] = []
     failed_step_key: str | None = None

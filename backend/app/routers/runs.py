@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.models.branch_execution import BranchExecution
 from app.models.run import Run
 from app.models.step_execution import StepExecution
 from app.models.step_result import StepResult
@@ -84,8 +85,18 @@ async def get_run_timeline(
         .order_by(StepExecution.step_index.asc(), StepExecution.created_at.asc())
     )
     steps = list(result.scalars().all())
+    branch_result = await db.execute(
+        select(BranchExecution)
+        .where(BranchExecution.run_id == run_id)
+        .order_by(BranchExecution.created_at.asc())
+    )
     failed_step = next((step for step in steps if step.status == "failed"), None)
-    return {"run": run, "steps": steps, "failed_step_key": failed_step.step_key if failed_step else None}
+    return {
+        "run": run,
+        "steps": steps,
+        "branches": list(branch_result.scalars().all()),
+        "failed_step_key": failed_step.step_key if failed_step else None,
+    }
 
 
 @router.post("/{id}/cancel", response_model=RunRead)
