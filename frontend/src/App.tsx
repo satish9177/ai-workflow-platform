@@ -11,6 +11,7 @@ import TemplateDetailPage from "./pages/TemplateDetailPage";
 import TemplatesPage from "./pages/TemplatesPage";
 import Workflows from "./pages/Workflows";
 import WorkflowDetailPage from "./pages/WorkflowDetailPage";
+import WorkflowStudioPage from "./pages/WorkflowStudioPage";
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
   if (!localStorage.getItem("token")) {
@@ -81,7 +82,9 @@ export default function App() {
       <Route path="/runs" element={<ProtectedPage><Runs /></ProtectedPage>} />
       <Route path="/runs/:id" element={<ProtectedPage><RunDetail /></ProtectedPage>} />
       <Route path="/workflows" element={<ProtectedPage><Workflows /></ProtectedPage>} />
+      <Route path="/workflows/new/studio" element={<ProtectedPage><WorkflowStudioPage /></ProtectedPage>} />
       <Route path="/workflows/:id" element={<ProtectedPage><WorkflowDetailPage /></ProtectedPage>} />
+      <Route path="/workflows/:id/studio" element={<ProtectedPage><WorkflowStudioPage /></ProtectedPage>} />
       <Route path="/approvals" element={<ProtectedPage><Approvals /></ProtectedPage>} />
       <Route path="/providers" element={<ProtectedPage><Providers /></ProtectedPage>} />
       <Route path="/integrations" element={<ProtectedPage><Integrations /></ProtectedPage>} />
