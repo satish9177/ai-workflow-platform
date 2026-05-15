@@ -18,6 +18,7 @@ This roadmap documents what exists, what is intentionally unsupported, and where
 - Webhook triggers.
 - React internal dashboard.
 - Docker Compose deployment.
+- JSON-first Workflow Studio V1.
 
 ## Completed V2 Orchestration Features
 
@@ -34,6 +35,14 @@ This roadmap documents what exists, what is intentionally unsupported, and where
 - DB-backed invariants for duplicate prevention.
 - Multiple integration instances.
 - SMTP, Slack, Discord, HTTP integrations.
+
+## Completed V2 UI Features
+
+- Workflow Studio V1 for full JSON workflow editing.
+- Structure preview for nested workflow documents.
+- Validation panel for JSON/root/step checks.
+- Step snippets for LLM, tools, approvals, parallel groups, foreach, and switch.
+- Save/run flow from the Studio.
 
 ## Current System Boundaries
 

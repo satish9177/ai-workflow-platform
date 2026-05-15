@@ -19,6 +19,8 @@ The frontend is an internal React dashboard in `frontend/`. It is intentionally 
 - `/runs/:id`: run timeline and debugging view.
 - `/workflows`: workflow list, trigger, toggle, schedule badge.
 - `/workflows/:id`: workflow detail, trigger settings, schedule/webhook UI, lightweight step editor.
+- `/workflows/:id/studio`: Workflow Studio V1 for full JSON-first workflow editing.
+- `/workflows/new/studio`: create a new workflow from a full JSON document.
 - `/approvals`: pending approval cards.
 - `/integrations`: integration instance management.
 - `/providers`: LLM provider/model browser.
@@ -49,7 +51,7 @@ Feature-specific clients live under `src/api/`.
 
 ## Workflow Editing
 
-The editor is intentionally form/textarea based:
+The workflow detail editor is intentionally form/textarea based:
 
 - LLM prompts and system messages
 - approval messages
@@ -58,6 +60,21 @@ The editor is intentionally form/textarea based:
 - trigger config
 
 It preserves unknown step fields to avoid damaging workflow definitions created through API or future UI versions.
+
+## Workflow Studio V1
+
+Workflow Studio is the JSON-first editor for full workflow documents, including `steps`.
+
+It provides:
+
+- full workflow JSON editing
+- frontend validation panel
+- backend save errors
+- structure preview for linear, `parallel_group`, `foreach`, and `switch`
+- step snippets for common V2 primitives
+- save and run actions
+
+It is not a DAG canvas, graph editor, or drag/drop builder. The goal is developer/operator workflow testing without Swagger.
 
 ## Local Commands
 
@@ -85,4 +102,4 @@ If unset, the client falls back to `http://localhost:8000`.
 
 ## UI Boundaries
 
-The current UI is an operator dashboard, not a full visual workflow studio. It intentionally does not implement drag/drop graph editing, branch graph visualization, or schema-driven form generation yet.
+The current UI is an operator dashboard plus JSON-first Workflow Studio. It intentionally does not implement drag/drop graph editing, branch graph visualization, or schema-driven form generation yet.

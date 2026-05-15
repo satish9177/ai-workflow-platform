@@ -29,6 +29,9 @@ export default function Workflows() {
         <h2 className="text-2xl font-semibold">Workflows</h2>
         <p className="text-sm text-slate-500">Create workflows through the API, then manage them here.</p>
       </div>
+      <div>
+        <Link className="btn-primary" to="/workflows/new/studio">New workflow in Studio</Link>
+      </div>
       {isLoading && <div className="card">Loading...</div>}
       {error && <div className="card text-sm text-red-700">{getErrorMessage(error)}</div>}
       <div className="card overflow-hidden p-0">
@@ -65,6 +68,7 @@ export default function Workflows() {
                 <td className="table-cell">
                   <div className="flex gap-2">
                     <Link className="btn-secondary" to={`/workflows/${workflow.id}`}>View details</Link>
+                    <Link className="btn-secondary" to={`/workflows/${workflow.id}/studio`}>Open Studio</Link>
                     <button className="btn-secondary" onClick={() => triggerRun(workflow.id)}>Trigger Run</button>
                     <button className="btn-secondary" onClick={() => toggle(workflow.id)}>Toggle</button>
                   </div>
