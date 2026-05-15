@@ -2,10 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 
 import { api, getErrorMessage } from "../api/client";
-import ExecutionTimeline from "../components/run/ExecutionTimeline";
+import ExecutionTimeline from "../components/timeline/ExecutionTimeline";
 import RunHeader from "../components/run/RunHeader";
 import RunErrorSummary from "../components/run/RunErrorSummary";
 import type { RunTimeline } from "../types/api";
+
+const ACTIVE_RUN_STATUSES = new Set(["pending", "queued", "running", "paused", "partially_paused"]);
 
 export default function RunDetail() {
   const { id } = useParams();
@@ -15,7 +17,7 @@ export default function RunDetail() {
     enabled: Boolean(id),
     refetchInterval: (query) => {
       const status = query.state.data?.run.status;
-      return status === "running" || status === "paused" ? 3000 : false;
+      return status && ACTIVE_RUN_STATUSES.has(status) ? 3000 : false;
     },
   });
 
@@ -44,7 +46,7 @@ export default function RunDetail() {
           {data.run.status === "failed" && (
             <RunErrorSummary failedStep={data.steps.find((step) => step.step_key === data.failed_step_key)} />
           )}
-          <ExecutionTimeline failedStepKey={data.failed_step_key} steps={data.steps} />
+          <ExecutionTimeline steps={data.steps} />
         </>
       )}
     </section>

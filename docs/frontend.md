@@ -36,7 +36,17 @@ Timeline data comes from:
 - `StepExecution` rows for step/container lifecycle.
 - `BranchExecution` rows for parallel/foreach fan-in state.
 
-The UI should treat `step_key`, `parent_step_id`, `foreach_index`, and `branch_key` as display/debugging metadata. It should not infer execution semantics that are not present in the API.
+The Run Detail timeline renders a nested execution tree, not a DAG/canvas view. It supports:
+
+- linear step hierarchy
+- `parallel_group` branches
+- `foreach` iterations
+- `switch` selected/skipped branches
+- approvals and approval timeout states
+- retry attempts
+- payload previews and structured errors
+
+The UI builds hierarchy from `parent_step_id` and dotted `step_key` fallback. It should treat `step_key`, `parent_step_id`, `foreach_index`, and `branch_key` as display/debugging metadata. It should not infer execution semantics that are not present in the API.
 
 ## API Client
 
