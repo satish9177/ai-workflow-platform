@@ -11,7 +11,19 @@ export type Workflow = {
   updated_at?: string | null;
 };
 
-export type RunStatus = "pending" | "running" | "paused" | "completed" | "failed" | "cancelled";
+export type RunStatus =
+  | "pending"
+  | "queued"
+  | "running"
+  | "paused"
+  | "partially_paused"
+  | "awaiting_approval"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped"
+  | "auto_approved"
+  | "auto_rejected";
 
 export type StepResult = {
   id: string;
@@ -45,10 +57,15 @@ export type RunDetail = Run & {
 export type StepExecution = {
   id: string;
   run_id: string;
+  branch_execution_id?: string | null;
+  parent_step_id?: string | null;
   step_index: number;
   step_key: string;
   step_type: string;
   step_label?: string | null;
+  foreach_index?: number | null;
+  foreach_item?: unknown;
+  branch_key?: string | null;
   status: string;
   attempt_number: number;
   max_attempts: number;
